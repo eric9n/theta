@@ -1,0 +1,18 @@
+[Unit]
+Description=theta capture-signals sampler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/theta
+Environment=HOME=/home/%i
+Environment=RUST_LOG=info
+EnvironmentFile=-/home/%i/.config/theta/capture-signals.env
+ExecStart=/home/%i/theta/target/release/capture-signals --loop --every-seconds 300 --market-hours-only
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
