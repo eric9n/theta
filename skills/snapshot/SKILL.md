@@ -55,7 +55,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh probe [--symbol <symbol>]
+./scripts/snapshot.sh probe {{#symbol}}--symbol {{symbol}}{{/symbol}}
 ```
 
 ### Tool: stock_quote
@@ -68,7 +68,7 @@ Required parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh stock-quote --symbol <symbol>
+./scripts/snapshot.sh stock-quote --symbol {{symbol}}
 ```
 
 ### Tool: option_expiries
@@ -81,7 +81,7 @@ Required parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh option-expiries --symbol <symbol>
+./scripts/snapshot.sh option-expiries --symbol {{symbol}}
 ```
 
 ### Tool: option_quote
@@ -97,7 +97,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh option-quote --symbol <symbol> [--json]
+./scripts/snapshot.sh option-quote --symbol {{symbol}} {{#json}}--json{{/json}}
 ```
 
 ### Tool: option_chain
@@ -117,7 +117,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh option-chain --symbol <symbol> --expiry <expiry> [--only-liquid] [--exclude-abnormal] [--exclude-near-expiry] [--json]
+./scripts/snapshot.sh option-chain --symbol {{symbol}} --expiry {{expiry}} {{#only_liquid}}--only-liquid{{/only_liquid}} {{#exclude_abnormal}}--exclude-abnormal{{/exclude_abnormal}} {{#exclude_near_expiry}}--exclude-near-expiry{{/exclude_near_expiry}} {{#json}}--json{{/json}}
 ```
 
 ### Tool: analyze_option
@@ -140,7 +140,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh analyze-option --symbol <symbol> [--rate <rate>] [--dividend <dividend>] [--iv <iv>] [--iv-from-option-price <iv_from_option_price>] [--iv-from-market-price] [--show-iv-diff] [--use-provider-greeks] [--json]
+./scripts/snapshot.sh analyze-option --symbol {{symbol}} {{#rate}}--rate {{rate}}{{/rate}} {{#dividend}}--dividend {{dividend}}{{/dividend}} {{#iv}}--iv {{iv}}{{/iv}} {{#iv_from_option_price}}--iv-from-option-price {{iv_from_option_price}}{{/iv_from_option_price}} {{#iv_from_market_price}}--iv-from-market-price{{/iv_from_market_price}} {{#show_iv_diff}}--show-iv-diff{{/show_iv_diff}} {{#use_provider_greeks}}--use-provider-greeks{{/use_provider_greeks}} {{#json}}--json{{/json}}
 ```
 
 ### Tool: analyze_chain
@@ -181,7 +181,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh analyze-chain --symbol <symbol> --expiry <expiry> [--rate <rate>] [--dividend <dividend>] [--iv <iv>] [--iv-from-market-price] [--side <side>] [--min-strike <min_strike>] [--max-strike <max_strike>] [--min-delta <min_delta>] [--max-delta <max_delta>] [--min-theta <min_theta>] [--max-theta <max_theta>] [--min-vega <min_vega>] [--max-vega <max_vega>] [--min-iv <min_iv>] [--max-iv <max_iv>] [--min-option-price <min_option_price>] [--max-option-price <max_option_price>] [--min-otm-percent <min_otm_percent>] [--max-otm-percent <max_otm_percent>] [--only-liquid] [--exclude-abnormal] [--exclude-near-expiry] [--sort-by <sort_by>] [--limit <limit>] [--json]
+./scripts/snapshot.sh analyze-chain --symbol {{symbol}} --expiry {{expiry}} {{#rate}}--rate {{rate}}{{/rate}} {{#dividend}}--dividend {{dividend}}{{/dividend}} {{#iv}}--iv {{iv}}{{/iv}} {{#iv_from_market_price}}--iv-from-market-price{{/iv_from_market_price}} {{#side}}--side {{side}}{{/side}} {{#min_strike}}--min-strike {{min_strike}}{{/min_strike}} {{#max_strike}}--max-strike {{max_strike}}{{/max_strike}} {{#min_delta}}--min-delta {{min_delta}}{{/min_delta}} {{#max_delta}}--max-delta {{max_delta}}{{/max_delta}} {{#min_theta}}--min-theta {{min_theta}}{{/min_theta}} {{#max_theta}}--max-theta {{max_theta}}{{/max_theta}} {{#min_vega}}--min-vega {{min_vega}}{{/min_vega}} {{#max_vega}}--max-vega {{max_vega}}{{/max_vega}} {{#min_iv}}--min-iv {{min_iv}}{{/min_iv}} {{#max_iv}}--max-iv {{max_iv}}{{/max_iv}} {{#min_option_price}}--min-option-price {{min_option_price}}{{/min_option_price}} {{#max_option_price}}--max-option-price {{max_option_price}}{{/max_option_price}} {{#min_otm_percent}}--min-otm-percent {{min_otm_percent}}{{/min_otm_percent}} {{#max_otm_percent}}--max-otm-percent {{max_otm_percent}}{{/max_otm_percent}} {{#only_liquid}}--only-liquid{{/only_liquid}} {{#exclude_abnormal}}--exclude-abnormal{{/exclude_abnormal}} {{#exclude_near_expiry}}--exclude-near-expiry{{/exclude_near_expiry}} {{#sort_by}}--sort-by {{sort_by}}{{/sort_by}} {{#limit}}--limit {{limit}}{{/limit}} {{#json}}--json{{/json}}
 ```
 
 ### Tool: mispricing
@@ -214,7 +214,7 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh mispricing --symbol <symbol> --expiry <expiry> [--rate <rate>] [--dividend <dividend>] [--iv <iv>] [--iv-from-market-price] [--side <side>] [--direction <direction>] [--iv-direction <iv_direction>] [--min-open-interest <min_open_interest>] [--min-volume <min_volume>] [--min-abs-mispricing-percent <min_abs_mispricing_percent>] [--min-abs-iv-diff-percent <min_abs_iv_diff_percent>] [--sort-by <sort_by>] [--group-by-side] [--summary-only] [--top-per-side <top_per_side>] [--limit <limit>] [--json]
+./scripts/snapshot.sh mispricing --symbol {{symbol}} --expiry {{expiry}} {{#rate}}--rate {{rate}}{{/rate}} {{#dividend}}--dividend {{dividend}}{{/dividend}} {{#iv}}--iv {{iv}}{{/iv}} {{#iv_from_market_price}}--iv-from-market-price{{/iv_from_market_price}} {{#side}}--side {{side}}{{/side}} {{#direction}}--direction {{direction}}{{/direction}} {{#iv_direction}}--iv-direction {{iv_direction}}{{/iv_direction}} {{#min_open_interest}}--min-open-interest {{min_open_interest}}{{/min_open_interest}} {{#min_volume}}--min-volume {{min_volume}}{{/min_volume}} {{#min_abs_mispricing_percent}}--min-abs-mispricing-percent {{min_abs_mispricing_percent}}{{/min_abs_mispricing_percent}} {{#min_abs_iv_diff_percent}}--min-abs-iv-diff-percent {{min_abs_iv_diff_percent}}{{/min_abs_iv_diff_percent}} {{#sort_by}}--sort-by {{sort_by}}{{/sort_by}} {{#group_by_side}}--group-by-side{{/group_by_side}} {{#summary_only}}--summary-only{{/summary_only}} {{#top_per_side}}--top-per-side {{top_per_side}}{{/top_per_side}} {{#limit}}--limit {{limit}}{{/limit}} {{#json}}--json{{/json}}
 ```
 
 ### Tool: sell_opportunities
@@ -258,5 +258,5 @@ Optional parameters:
 Command template:
 
 ```bash
-./scripts/snapshot.sh sell-opportunities --symbol <symbol> --expiry <expiry> [--rate <rate>] [--dividend <dividend>] [--iv <iv>] [--iv-from-market-price] [--direction <direction>] [--iv-direction <iv_direction>] [--min-open-interest <min_open_interest>] [--min-volume <min_volume>] [--min-abs-mispricing-percent <min_abs_mispricing_percent>] [--min-abs-iv-diff-percent <min_abs_iv_diff_percent>] [--min-premium-or-credit <min_premium_or_credit>] [--max-risk <max_risk>] [--min-annualized-return <min_annualized_return>] [--max-annualized-return <max_annualized_return>] [--strategy <strategy>]... [--exclude-strategy <exclude_strategy>]... [--include-calendars] [--include-diagonals] [--min-days-gap <min_days_gap>] [--max-days-gap <max_days_gap>] [--min-strike-gap <min_strike_gap>] [--max-strike-gap <max_strike_gap>] [--sort-by <sort_by>] [--limit-per-strategy <limit_per_strategy>] [--group-by-strategy] [--summary-only] [--limit <limit>] [--json]
+./scripts/snapshot.sh sell-opportunities --symbol {{symbol}} --expiry {{expiry}} {{#rate}}--rate {{rate}}{{/rate}} {{#dividend}}--dividend {{dividend}}{{/dividend}} {{#iv}}--iv {{iv}}{{/iv}} {{#iv_from_market_price}}--iv-from-market-price{{/iv_from_market_price}} {{#direction}}--direction {{direction}}{{/direction}} {{#iv_direction}}--iv-direction {{iv_direction}}{{/iv_direction}} {{#min_open_interest}}--min-open-interest {{min_open_interest}}{{/min_open_interest}} {{#min_volume}}--min-volume {{min_volume}}{{/min_volume}} {{#min_abs_mispricing_percent}}--min-abs-mispricing-percent {{min_abs_mispricing_percent}}{{/min_abs_mispricing_percent}} {{#min_abs_iv_diff_percent}}--min-abs-iv-diff-percent {{min_abs_iv_diff_percent}}{{/min_abs_iv_diff_percent}} {{#min_premium_or_credit}}--min-premium-or-credit {{min_premium_or_credit}}{{/min_premium_or_credit}} {{#max_risk}}--max-risk {{max_risk}}{{/max_risk}} {{#min_annualized_return}}--min-annualized-return {{min_annualized_return}}{{/min_annualized_return}} {{#max_annualized_return}}--max-annualized-return {{max_annualized_return}}{{/max_annualized_return}} {{#strategy}}--strategy '{{.}}' {{/strategy}} {{#exclude_strategy}}--exclude-strategy '{{.}}' {{/exclude_strategy}} {{#include_calendars}}--include-calendars{{/include_calendars}} {{#include_diagonals}}--include-diagonals{{/include_diagonals}} {{#min_days_gap}}--min-days-gap {{min_days_gap}}{{/min_days_gap}} {{#max_days_gap}}--max-days-gap {{max_days_gap}}{{/max_days_gap}} {{#min_strike_gap}}--min-strike-gap {{min_strike_gap}}{{/min_strike_gap}} {{#max_strike_gap}}--max-strike-gap {{max_strike_gap}}{{/max_strike_gap}} {{#sort_by}}--sort-by {{sort_by}}{{/sort_by}} {{#limit_per_strategy}}--limit-per-strategy {{limit_per_strategy}}{{/limit_per_strategy}} {{#group_by_strategy}}--group-by-strategy{{/group_by_strategy}} {{#summary_only}}--summary-only{{/summary_only}} {{#limit}}--limit {{limit}}{{/limit}} {{#json}}--json{{/json}}
 ```
