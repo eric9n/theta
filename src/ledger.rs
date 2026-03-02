@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -53,6 +53,16 @@ pub struct Position {
     pub total_cost: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountSnapshot {
+    pub id: i64,
+    pub snapshot_at: String,
+    pub cash_balance: f64,
+    pub option_buying_power: Option<f64>,
+    pub margin_enabled: bool,
+    pub notes: String,
+}
+
 // ---------------------------------------------------------------------------
 // Query filters
 // ---------------------------------------------------------------------------
@@ -63,6 +73,11 @@ pub struct TradeFilter {
     pub from_date: Option<String>,
     pub to_date: Option<String>,
     pub symbol: Option<String>,
+}
+
+struct PosAccum {
+    net_quantity: i64,
+    open_cost_total: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +126,39 @@ impl Ledger {
 
             CREATE INDEX IF NOT EXISTS idx_trades_underlying ON trades(underlying);
             CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol);
-            CREATE INDEX IF NOT EXISTS idx_trades_date       ON trades(trade_date);",
+            CREATE INDEX IF NOT EXISTS idx_trades_date       ON trades(trade_date);
+
+            CREATE TABLE IF NOT EXISTS account_snapshots (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_at         TEXT    NOT NULL,
+                cash_balance        REAL    NOT NULL,
+                option_buying_power REAL,
+                margin_enabled      INTEGER NOT NULL,
+                notes               TEXT    NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_account_snapshots_time
+                ON account_snapshots(snapshot_at);",
         )?;
         Ok(())
+    }
+
+    pub fn with_transaction<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Self) -> Result<T>,
+    {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = f(self);
+        match result {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -135,6 +180,77 @@ impl Ledger {
         commission: f64,
         notes: &str,
     ) -> Result<i64> {
+        self.record_trade_internal(
+            trade_date,
+            symbol,
+            underlying,
+            side,
+            strike,
+            expiry,
+            action,
+            quantity,
+            price,
+            commission,
+            notes,
+            false,
+        )
+    }
+
+    pub fn record_adjustment_trade(
+        &self,
+        trade_date: &str,
+        symbol: &str,
+        underlying: &str,
+        side: &str,
+        strike: Option<f64>,
+        expiry: Option<&str>,
+        action: &str,
+        quantity: i64,
+        price: f64,
+        commission: f64,
+        notes: &str,
+    ) -> Result<i64> {
+        self.record_trade_internal(
+            trade_date,
+            symbol,
+            underlying,
+            side,
+            strike,
+            expiry,
+            action,
+            quantity,
+            price,
+            commission,
+            notes,
+            true,
+        )
+    }
+
+    fn record_trade_internal(
+        &self,
+        trade_date: &str,
+        symbol: &str,
+        underlying: &str,
+        side: &str,
+        strike: Option<f64>,
+        expiry: Option<&str>,
+        action: &str,
+        quantity: i64,
+        price: f64,
+        commission: f64,
+        notes: &str,
+        allow_zero_price: bool,
+    ) -> Result<i64> {
+        ensure!(matches!(side, "call" | "put" | "stock"), "invalid side: {side}");
+        ensure!(matches!(action, "buy" | "sell"), "invalid action: {action}");
+        ensure!(quantity > 0, "quantity must be positive");
+        if allow_zero_price {
+            ensure!(price >= 0.0, "price must be non-negative");
+        } else {
+            ensure!(price > 0.0, "price must be positive");
+        }
+        ensure!(commission >= 0.0, "commission must be non-negative");
+
         self.conn.execute(
             "INSERT INTO trades (trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -150,6 +266,27 @@ impl Ledger {
             params![id],
         )?;
         Ok(affected > 0)
+    }
+
+    pub fn record_account_snapshot(
+        &self,
+        snapshot_at: &str,
+        cash_balance: f64,
+        option_buying_power: Option<f64>,
+        margin_enabled: bool,
+        notes: &str,
+    ) -> Result<i64> {
+        ensure!(cash_balance >= 0.0, "cash_balance must be non-negative");
+        if let Some(obp) = option_buying_power {
+            ensure!(obp >= 0.0, "option_buying_power must be non-negative");
+        }
+
+        self.conn.execute(
+            "INSERT INTO account_snapshots (snapshot_at, cash_balance, option_buying_power, margin_enabled, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![snapshot_at, cash_balance, option_buying_power, margin_enabled, notes],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     // -----------------------------------------------------------------------
@@ -227,12 +364,6 @@ impl Ledger {
             expiry: Option<String>,
         }
 
-        struct PosAccum {
-            net_quantity: i64,
-            total_buy_cost: f64,
-            total_buy_qty: i64,
-        }
-
         let mut accum: HashMap<PosKey, PosAccum> = HashMap::new();
 
         for t in &trades {
@@ -246,20 +377,49 @@ impl Ledger {
 
             let entry = accum.entry(key).or_insert(PosAccum {
                 net_quantity: 0,
-                total_buy_cost: 0.0,
-                total_buy_qty: 0,
+                open_cost_total: 0.0,
             });
 
-            match t.action.as_str() {
-                "buy" => {
-                    entry.net_quantity += t.quantity;
-                    entry.total_buy_cost += t.price * t.quantity as f64;
-                    entry.total_buy_qty += t.quantity;
+            let signed_trade_quantity = match t.action.as_str() {
+                "buy" => t.quantity,
+                "sell" => -t.quantity,
+                _ => continue,
+            };
+            let trade_quantity_abs = t.quantity;
+            let trade_direction = signed_trade_quantity.signum();
+
+            if entry.net_quantity == 0 || entry.net_quantity.signum() == trade_direction {
+                apply_open_trade(
+                    entry,
+                    trade_direction,
+                    trade_quantity_abs,
+                    t.price,
+                    t.commission,
+                );
+                continue;
+            }
+
+            let closing_quantity = trade_quantity_abs.min(entry.net_quantity.unsigned_abs() as i64);
+            if closing_quantity > 0 {
+                let avg_open_cost = entry.open_cost_total / entry.net_quantity.unsigned_abs() as f64;
+                entry.net_quantity += trade_direction * closing_quantity;
+                entry.open_cost_total -= avg_open_cost * closing_quantity as f64;
+                if entry.net_quantity == 0 {
+                    entry.open_cost_total = 0.0;
                 }
-                "sell" => {
-                    entry.net_quantity -= t.quantity;
-                }
-                _ => {}
+            }
+
+            let opening_remainder = trade_quantity_abs - closing_quantity;
+            if opening_remainder > 0 {
+                let opening_commission = t.commission
+                    * (opening_remainder as f64 / trade_quantity_abs as f64);
+                apply_open_trade(
+                    entry,
+                    trade_direction,
+                    opening_remainder,
+                    t.price,
+                    opening_commission,
+                );
             }
         }
 
@@ -267,8 +427,8 @@ impl Ledger {
             .into_iter()
             .filter(|(_, v)| v.net_quantity != 0)
             .map(|(k, v)| {
-                let avg_cost = if v.total_buy_qty > 0 {
-                    v.total_buy_cost / v.total_buy_qty as f64
+                let avg_cost = if v.net_quantity != 0 {
+                    v.open_cost_total / v.net_quantity.unsigned_abs() as f64
                 } else {
                     0.0
                 };
@@ -284,7 +444,7 @@ impl Ledger {
                     expiry: k.expiry,
                     net_quantity: v.net_quantity,
                     avg_cost,
-                    total_cost: (avg_cost * v.net_quantity.unsigned_abs() as f64),
+                    total_cost: v.open_cost_total.abs(),
                 }
             })
             .collect();
@@ -302,6 +462,56 @@ impl Ledger {
         });
 
         Ok(positions)
+    }
+
+    pub fn latest_account_snapshot(&self) -> Result<Option<AccountSnapshot>> {
+        let mut snapshots = self.list_account_snapshots(1)?;
+        Ok(snapshots.pop())
+    }
+
+    pub fn list_account_snapshots(&self, limit: usize) -> Result<Vec<AccountSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, snapshot_at, cash_balance, option_buying_power, margin_enabled, notes
+             FROM account_snapshots
+             ORDER BY snapshot_at DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(AccountSnapshot {
+                id: row.get(0)?,
+                snapshot_at: row.get(1)?,
+                cash_balance: row.get(2)?,
+                option_buying_power: row.get(3)?,
+                margin_enabled: row.get(4)?,
+                notes: row.get(5)?,
+            })
+        })?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+}
+
+fn apply_open_trade(
+    accum: &mut PosAccum,
+    direction: i64,
+    quantity: i64,
+    price: f64,
+    commission: f64,
+) {
+    if quantity <= 0 {
+        return;
+    }
+
+    accum.net_quantity += direction * quantity;
+
+    if direction > 0 {
+        accum.open_cost_total += price * quantity as f64 + commission;
+    } else {
+        accum.open_cost_total += price * quantity as f64 - commission;
     }
 }
 
@@ -391,6 +601,7 @@ mod tests {
         let call = positions.iter().find(|p| p.side == "call").unwrap();
         // sold 2, bought 1 back → net = -1 (short 1 contract)
         assert_eq!(call.net_quantity, -1);
+        assert!((call.avg_cost - 5.30).abs() < 0.001);
     }
 
     #[test]
@@ -424,6 +635,117 @@ mod tests {
         let ledger = in_memory_ledger();
         ledger.record_trade("2026-01-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 350.0, 0.0, "").unwrap();
         ledger.record_trade("2026-02-01", "TSLA", "TSLA", "stock", None, None, "sell", 100, 400.0, 0.0, "").unwrap();
+
+        let positions = ledger.calculate_positions(None).unwrap();
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn short_positions_keep_opening_credit_as_cost_basis() {
+        let ledger = in_memory_ledger();
+        ledger
+            .record_trade(
+                "2026-03-01",
+                "TSLA260320P00350000",
+                "TSLA",
+                "put",
+                Some(350.0),
+                Some("2026-03-20"),
+                "sell",
+                1,
+                5.00,
+                0.0,
+                "",
+            )
+            .unwrap();
+
+        let positions = ledger.calculate_positions(None).unwrap();
+        let put = positions.iter().find(|p| p.side == "put").unwrap();
+        assert_eq!(put.net_quantity, -1);
+        assert!((put.avg_cost - 5.00).abs() < 0.001);
+        assert!((put.total_cost - 5.00).abs() < 0.001);
+    }
+
+    #[test]
+    fn commissions_are_included_in_remaining_open_cost() {
+        let ledger = in_memory_ledger();
+        ledger
+            .record_trade(
+                "2026-03-01",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                100,
+                10.0,
+                5.0,
+                "",
+            )
+            .unwrap();
+
+        let positions = ledger.calculate_positions(None).unwrap();
+        let stock = positions.iter().find(|p| p.side == "stock").unwrap();
+        assert_eq!(stock.net_quantity, 100);
+        assert!((stock.avg_cost - 10.05).abs() < 0.001);
+        assert!((stock.total_cost - 1005.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn account_snapshots_roundtrip() {
+        let ledger = in_memory_ledger();
+        let id = ledger
+            .record_account_snapshot(
+                "2026-03-02T09:30:00Z",
+                50_000.0,
+                Some(120_000.0),
+                true,
+                "initial snapshot",
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+
+        let latest = ledger.latest_account_snapshot().unwrap().expect("snapshot");
+        assert_eq!(latest.cash_balance, 50_000.0);
+        assert_eq!(latest.option_buying_power, Some(120_000.0));
+        assert!(latest.margin_enabled);
+        assert_eq!(latest.notes, "initial snapshot");
+    }
+
+    #[test]
+    fn zero_priced_adjustments_can_close_positions() {
+        let ledger = in_memory_ledger();
+        ledger
+            .record_trade(
+                "2026-03-01",
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                Some(400.0),
+                Some("2026-03-20"),
+                "buy",
+                1,
+                5.0,
+                0.0,
+                "",
+            )
+            .unwrap();
+        ledger
+            .record_adjustment_trade(
+                "2026-03-20",
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                Some(400.0),
+                Some("2026-03-20"),
+                "sell",
+                1,
+                0.0,
+                0.0,
+                "expired",
+            )
+            .unwrap();
 
         let positions = ledger.calculate_positions(None).unwrap();
         assert!(positions.is_empty());

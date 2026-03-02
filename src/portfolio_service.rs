@@ -55,6 +55,7 @@ async fn enrich_stock(
     Ok(EnrichedPosition {
         symbol: pos.symbol.clone(),
         underlying: pos.underlying.clone(),
+        underlying_spot: Some(spot),
         side: pos.side.clone(),
         strike: pos.strike,
         expiry: pos.expiry.clone(),
@@ -113,6 +114,7 @@ async fn enrich_option(
     Ok(EnrichedPosition {
         symbol: pos.symbol.clone(),
         underlying: pos.underlying.clone(),
+        underlying_spot: Some(underlying_price),
         side: pos.side.clone(),
         strike: pos.strike,
         expiry: pos.expiry.clone(),
@@ -152,6 +154,7 @@ fn fallback_enriched(pos: &Position) -> EnrichedPosition {
     EnrichedPosition {
         symbol: pos.symbol.clone(),
         underlying: pos.underlying.clone(),
+        underlying_spot: None,
         side: pos.side.clone(),
         strike: pos.strike,
         expiry: pos.expiry.clone(),

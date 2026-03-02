@@ -4,6 +4,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod domain;
 pub mod ledger;
+pub mod margin_engine;
 pub mod market_data;
 pub mod portfolio_service;
 pub mod rate;

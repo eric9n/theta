@@ -30,13 +30,11 @@ pub fn identify_strategies(positions: &[Position]) -> Vec<IdentifiedStrategy> {
         identify_vertical_spreads(&underlying, &mut legs, &mut strategies);
         // 4. Covered Call (stock + short call)
         identify_covered_calls(&underlying, &mut legs, &mut strategies);
-        // 5. Cash-Secured Put (short put backed by cash)
-        identify_cash_secured_puts(&underlying, &mut legs, &mut strategies);
-        // 6. Straddle / Strangle
+        // 5. Straddle / Strangle
         identify_straddles_strangles(&underlying, &mut legs, &mut strategies);
-        // 7. Remaining single-leg options
+        // 6. Remaining single-leg options
         identify_single_legs(&underlying, &mut legs, &mut strategies);
-        // 8. Remaining stock
+        // 7. Remaining stock
         identify_unmatched_stock(&underlying, &mut legs, &mut strategies);
     }
 
@@ -144,13 +142,14 @@ fn identify_iron_condors(
                     let sp = &legs[short_put_idx];
                     let lp = &legs[long_put_idx];
 
-                    let call_width =
-                        (lc.strike.unwrap_or(0.0) - sc.strike.unwrap_or(0.0)).abs();
-                    let put_width =
-                        (sp.strike.unwrap_or(0.0) - lp.strike.unwrap_or(0.0)).abs();
-                    let call_spread_risk = call_width * qty as f64 * 100.0;
-                    let put_spread_risk = put_width * qty as f64 * 100.0;
-                    let margin = call_spread_risk.max(put_spread_risk);
+                    let call_width = (lc.strike.unwrap_or(0.0) - sc.strike.unwrap_or(0.0)).abs();
+                    let put_width = (sp.strike.unwrap_or(0.0) - lp.strike.unwrap_or(0.0)).abs();
+                    let gross_call_spread_risk = call_width * qty as f64 * 100.0;
+                    let gross_put_spread_risk = put_width * qty as f64 * 100.0;
+                    let total_credit =
+                        spread_credit_total(sc, lc) + spread_credit_total(sp, lp);
+                    let max_side_risk = gross_call_spread_risk.max(gross_put_spread_risk);
+                    let margin = (max_side_risk - total_credit).max(0.0);
 
                     out.push(IdentifiedStrategy {
                         kind: StrategyKind::IronCondor,
@@ -164,8 +163,8 @@ fn identify_iron_condors(
                         margin: StrategyMargin {
                             margin_required: margin,
                             method: format!(
-                                "max(call_spread_risk={:.2}, put_spread_risk={:.2})",
-                                call_spread_risk, put_spread_risk
+                                "max_side_risk({:.2}) - total_credit({:.2}) = {:.2}",
+                                max_side_risk, total_credit, margin
                             ),
                         },
                         max_profit: None,
@@ -322,7 +321,7 @@ fn identify_vertical_spreads(
 
                 let qty = a.net_quantity.unsigned_abs() as f64;
                 let width = (a_strike - b_strike).abs();
-                let spread_risk = width * qty * 100.0;
+                let gross_spread_risk = width * qty * 100.0;
 
                 let (short, long) = if a.net_quantity < 0 { (a, b) } else { (b, a) };
                 let short_strike = short.strike.unwrap_or(0.0);
@@ -336,16 +335,25 @@ fn identify_vertical_spreads(
                     _ => continue,
                 };
 
-                let margin_method = match kind {
+                let net_credit_total = spread_credit_total(short, long);
+                let net_debit_total = spread_debit_total(short, long);
+                let (margin_required, max_loss, margin_method) = match kind {
                     StrategyKind::BullPutSpread | StrategyKind::BearCallSpread => {
-                        format!("width({:.2}) × qty({}) × 100 = {:.2}", width, qty, spread_risk)
+                        let max_loss = (gross_spread_risk - net_credit_total).max(0.0);
+                        (
+                            max_loss,
+                            Some(max_loss),
+                            format!(
+                                "gross_width_risk({:.2}) - net_credit({:.2}) = {:.2}",
+                                gross_spread_risk, net_credit_total, max_loss
+                            ),
+                        )
                     }
-                    _ => "Debit spread, no margin required".to_string(),
-                };
-
-                let margin_required = match kind {
-                    StrategyKind::BullPutSpread | StrategyKind::BearCallSpread => spread_risk,
-                    _ => 0.0,
+                    _ => (
+                        0.0,
+                        Some(net_debit_total.max(0.0)),
+                        "Debit spread, no margin required".to_string(),
+                    ),
                 };
 
                 out.push(IdentifiedStrategy {
@@ -357,7 +365,7 @@ fn identify_vertical_spreads(
                         method: margin_method,
                     },
                     max_profit: None,
-                    max_loss: Some(spread_risk),
+                    max_loss,
                     breakeven: vec![],
                 });
 
@@ -442,45 +450,6 @@ fn identify_covered_calls(
 }
 
 // ---------------------------------------------------------------------------
-// Cash-Secured Put: short put
-// ---------------------------------------------------------------------------
-
-fn identify_cash_secured_puts(
-    underlying: &str,
-    legs: &mut Vec<Position>,
-    out: &mut Vec<IdentifiedStrategy>,
-) {
-    let mut consumed = Vec::new();
-
-    for (i, p) in legs.iter().enumerate() {
-        if p.side == "put" && p.net_quantity < 0 {
-            let strike = p.strike.unwrap_or(0.0);
-            let qty = p.net_quantity.unsigned_abs() as f64;
-            let cash_required = strike * qty * 100.0;
-
-            out.push(IdentifiedStrategy {
-                kind: StrategyKind::CashSecuredPut,
-                underlying: underlying.to_string(),
-                legs: vec![pos_to_leg(p)],
-                margin: StrategyMargin {
-                    margin_required: cash_required,
-                    method: format!(
-                        "strike({:.2}) × qty({}) × 100 = {:.2}",
-                        strike, qty, cash_required
-                    ),
-                },
-                max_profit: None,
-                max_loss: Some(cash_required),
-                breakeven: vec![],
-            });
-            consumed.push(i);
-        }
-    }
-
-    remove_consumed(legs, &consumed);
-}
-
-// ---------------------------------------------------------------------------
 // Straddle / Strangle: long/short call + put at same/different strikes
 // ---------------------------------------------------------------------------
 
@@ -534,10 +503,20 @@ fn identify_straddles_strangles(
             };
 
             let is_short = call.net_quantity < 0;
+            let qty = call.net_quantity.unsigned_abs();
+            let spot_proxy = if same_strike {
+                call.strike.unwrap_or(0.0)
+            } else {
+                (call.strike.unwrap_or(0.0) + put.strike.unwrap_or(0.0)) / 2.0
+            };
             let margin = if is_short {
-                // For short straddle/strangle: higher of the two legs' margin + other premium
-                // Simplified: use Firstrade naked put formula for the put leg
-                0.0 // Will be computed in portfolio report with spot price
+                let call_leg_margin =
+                    naked_call_margin(spot_proxy, call.strike.unwrap_or(0.0), qty, call.avg_cost);
+                let put_leg_margin =
+                    naked_put_margin(spot_proxy, put.strike.unwrap_or(0.0), qty, put.avg_cost);
+                let call_premium_total = option_premium_total(call);
+                let put_premium_total = option_premium_total(put);
+                (call_leg_margin + put_premium_total).max(put_leg_margin + call_premium_total)
             } else {
                 0.0
             };
@@ -549,7 +528,10 @@ fn identify_straddles_strangles(
                 margin: StrategyMargin {
                     margin_required: margin,
                     method: if is_short {
-                        "Short straddle/strangle — requires spot price for margin".to_string()
+                        format!(
+                            "max(short_call_req + put_premium, short_put_req + call_premium) using spot proxy {:.2}",
+                            spot_proxy
+                        )
                     } else {
                         "Debit strategy, no margin required".to_string()
                     },
@@ -590,13 +572,26 @@ fn identify_single_legs(
             _ => continue,
         };
 
+        let (margin_required, method) = match kind {
+            StrategyKind::NakedPut => {
+                let strike = p.strike.unwrap_or(0.0);
+                let qty = p.net_quantity.unsigned_abs();
+                let margin = naked_put_margin(strike, strike, qty, p.avg_cost);
+                (
+                    margin,
+                    format!("Naked put formula using strike {:.2} as spot proxy", strike),
+                )
+            }
+            _ => (0.0, "Debit strategy, no margin required".to_string()),
+        };
+
         out.push(IdentifiedStrategy {
             kind,
             underlying: underlying.to_string(),
             legs: vec![pos_to_leg(p)],
             margin: StrategyMargin {
-                margin_required: 0.0,
-                method: "Requires spot price for margin calculation".to_string(),
+                margin_required,
+                method,
             },
             max_profit: None,
             max_loss: None,
@@ -661,6 +656,28 @@ pub fn naked_put_margin(
     formula_a.max(formula_b)
 }
 
+/// Calculate naked call margin using the call-side mirror of the naked put formula.
+pub fn naked_call_margin(
+    spot: f64,
+    strike: f64,
+    quantity: u64,
+    premium_per_contract: f64,
+) -> f64 {
+    let qty = quantity as f64;
+    let multiplier = qty * 100.0;
+    let premium_total = premium_per_contract * multiplier;
+    let otm_amount = if strike > spot {
+        (strike - spot) * multiplier
+    } else {
+        0.0
+    };
+
+    let formula_a = 0.20 * spot * multiplier - otm_amount + premium_total;
+    let formula_b = 0.10 * spot * multiplier + premium_total;
+
+    formula_a.max(formula_b)
+}
+
 // ---------------------------------------------------------------------------
 // Portfolio Greeks aggregation
 // ---------------------------------------------------------------------------
@@ -697,6 +714,18 @@ fn pos_to_leg(p: &Position) -> StrategyLeg {
         quantity: p.net_quantity,
         price: p.avg_cost,
     }
+}
+
+fn option_premium_total(position: &Position) -> f64 {
+    position.avg_cost * position.net_quantity.unsigned_abs() as f64 * 100.0
+}
+
+fn spread_credit_total(short: &Position, long: &Position) -> f64 {
+    (short.avg_cost - long.avg_cost).max(0.0) * short.net_quantity.unsigned_abs() as f64 * 100.0
+}
+
+fn spread_debit_total(short: &Position, long: &Position) -> f64 {
+    (long.avg_cost - short.avg_cost).max(0.0) * short.net_quantity.unsigned_abs() as f64 * 100.0
 }
 
 fn remove_consumed(legs: &mut Vec<Position>, consumed: &[usize]) {
@@ -775,8 +804,8 @@ mod tests {
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::BullPutSpread);
-        // Margin = width × qty × 100 = 10 × 1 × 100 = 1000
-        assert!((strategies[0].margin.margin_required - 1000.0).abs() < 0.01);
+        // Width 10 => 1000 gross risk, net credit = (8 - 5) × 100 = 300, so max loss = 700
+        assert!((strategies[0].margin.margin_required - 700.0).abs() < 0.01);
     }
 
     #[test]
@@ -788,7 +817,7 @@ mod tests {
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::BearCallSpread);
-        assert!((strategies[0].margin.margin_required - 1000.0).abs() < 0.01);
+        assert!((strategies[0].margin.margin_required - 700.0).abs() < 0.01);
     }
 
     #[test]
@@ -805,6 +834,8 @@ mod tests {
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::IronCondor);
         assert_eq!(strategies[0].legs.len(), 4);
+        // Max side width = 1000, total credit = 300 + 200 = 500
+        assert!((strategies[0].margin.margin_required - 500.0).abs() < 0.01);
     }
 
     #[test]
@@ -830,15 +861,14 @@ mod tests {
     }
 
     #[test]
-    fn identifies_cash_secured_put() {
+    fn identifies_naked_put_when_cash_is_not_verified() {
         let positions = vec![
             option_pos("TSLA_P350", "TSLA", "put", 350.0, "2026-03-20", -2, 5.0),
         ];
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
-        assert_eq!(strategies[0].kind, StrategyKind::CashSecuredPut);
-        // Margin = strike × qty × 100 = 350 × 2 × 100 = 70000
-        assert!((strategies[0].margin.margin_required - 70000.0).abs() < 0.01);
+        assert_eq!(strategies[0].kind, StrategyKind::NakedPut);
+        assert!((strategies[0].margin.margin_required - 15000.0).abs() < 0.01);
     }
 
     #[test]
@@ -876,5 +906,17 @@ mod tests {
 
         let long_put = strategies.iter().find(|s| s.kind == StrategyKind::LongPut);
         assert!(long_put.is_some());
+    }
+
+    #[test]
+    fn short_straddle_has_non_zero_margin() {
+        let positions = vec![
+            option_pos("TSLA_C380", "TSLA", "call", 380.0, "2026-03-20", -1, 10.0),
+            option_pos("TSLA_P380", "TSLA", "put", 380.0, "2026-03-20", -1, 8.0),
+        ];
+        let strategies = identify_strategies(&positions);
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].kind, StrategyKind::Straddle);
+        assert!(strategies[0].margin.margin_required > 0.0);
     }
 }

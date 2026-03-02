@@ -54,6 +54,8 @@ impl std::fmt::Display for StrategyKind {
 pub struct EnrichedPosition {
     pub symbol: String,
     pub underlying: String,
+    /// Live underlying spot price when available
+    pub underlying_spot: Option<f64>,
     /// "call", "put", or "stock"
     pub side: String,
     pub strike: Option<f64>,
