@@ -259,6 +259,140 @@ Compare current market-tone summary metrics against stored history:
 cargo run --bin market-extreme -- --symbol TSLA.US
 ```
 
+## Portfolio
+
+Trade journal, account snapshots, position reconstruction, and risk reporting:
+
+```bash
+cargo run --bin portfolio -- --help
+```
+
+Initialize the current account state before using `strategies` or `report`:
+
+```bash
+cargo run --bin portfolio -- account set \
+  --cash-balance 50000 \
+  --option-buying-power 100000
+```
+
+For a cash account:
+
+```bash
+cargo run --bin portfolio -- account set \
+  --cash-balance 50000 \
+  --cash-account
+```
+
+Inspect account snapshots:
+
+```bash
+cargo run --bin portfolio -- account show
+cargo run --bin portfolio -- account history
+```
+
+Record basic trades:
+
+```bash
+cargo run --bin portfolio -- trade buy \
+  --symbol TSLA \
+  --underlying TSLA \
+  --quantity 100 \
+  --price 350 \
+  --side stock
+```
+
+```bash
+cargo run --bin portfolio -- trade sell \
+  --symbol TSLA260320P00350000 \
+  --underlying TSLA \
+  --quantity 1 \
+  --price 5.00 \
+  --side put \
+  --strike 350 \
+  --expiry 2026-03-20
+```
+
+Inspect the current state:
+
+```bash
+cargo run --bin portfolio -- positions
+cargo run --bin portfolio -- strategies
+cargo run --bin portfolio -- report --offline
+```
+
+Use live data when available:
+
+```bash
+cargo run --bin portfolio -- report
+```
+
+Record lifecycle events explicitly:
+
+Exercise a long option:
+
+```bash
+cargo run --bin portfolio -- trade exercise \
+  --symbol TSLA260320C00400000 \
+  --underlying TSLA \
+  --quantity 1 \
+  --side call \
+  --strike 400 \
+  --expiry 2026-03-20
+```
+
+Record assignment on a short option:
+
+```bash
+cargo run --bin portfolio -- trade assign \
+  --symbol TSLA260320P00350000 \
+  --underlying TSLA \
+  --quantity 1 \
+  --side put \
+  --strike 350 \
+  --expiry 2026-03-20
+```
+
+Record an expired option:
+
+```bash
+cargo run --bin portfolio -- trade expire \
+  --symbol TSLA260320C00400000 \
+  --underlying TSLA \
+  --quantity 1 \
+  --side call \
+  --position long \
+  --strike 400 \
+  --expiry 2026-03-20
+```
+
+Batch-handle expired open option positions:
+
+Dry-run first:
+
+```bash
+cargo run --bin portfolio -- trade settle-expiries \
+  --date 2026-03-20 \
+  --settlement-price TSLA=412.50 \
+  --settlement-price QQQ=518.20
+```
+
+Apply after review:
+
+```bash
+cargo run --bin portfolio -- trade settle-expiries \
+  --date 2026-03-20 \
+  --settlement-price TSLA=412.50 \
+  --settlement-price QQQ=518.20 \
+  --apply
+```
+
+Notes:
+
+- `strategies` and `report` require a stored account snapshot.
+- Lifecycle events validate that matching open option positions exist before writing.
+- `settle-expiries --apply` refuses partial settlement if prices are missing or validation fails.
+- Multi-step ledger updates are wrapped in SQLite transactions.
+
 Optional controls:
 
 ```bash
