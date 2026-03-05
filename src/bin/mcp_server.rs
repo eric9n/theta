@@ -588,13 +588,15 @@ async fn read_next_mcp_payload(
     Ok(Some(trimmed.to_string()))
 }
 
-fn transform_incoming_payload(payload: &str) -> String {
+fn transform_incoming_payload(payload: &str) -> (String, bool) {
     let mut v: Value = match serde_json::from_str(payload) {
         Ok(v) => v,
-        Err(_) => return payload.to_string(),
+        Err(_) => return (payload.to_string(), false),
     };
 
+    let mut is_init = false;
     if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+        is_init = true;
         if let Some(params) = v.get_mut("params") {
             let params_obj = params.as_object_mut();
             if let Some(o) = params_obj {
@@ -617,10 +619,10 @@ fn transform_incoming_payload(payload: &str) -> String {
         }
     }
     let result = serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string());
-    if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+    if is_init {
         tracing::debug!("Final incoming initialize payload: {}", result);
     }
-    result
+    (result, is_init)
 }
 
 fn transform_outgoing_payload(payload: &str) -> String {
@@ -689,13 +691,18 @@ async fn main() -> Result<()> {
                     if payload.trim().is_empty() {
                         continue;
                     }
-                    let transformed_payload = transform_incoming_payload(&payload);
+                    let (transformed_payload, is_init) = transform_incoming_payload(&payload);
                     tracing::debug!("Incoming MCP payload (raw): {}", payload);
                     if transformed_payload != payload {
                         tracing::debug!("Transformed payload: {}", transformed_payload);
                     }
                     if tx.send(transformed_payload).await.is_err() {
                         break;
+                    }
+                    if is_init {
+                        // Compatibility: synthesized initialized notification
+                        let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+                        let _ = tx.send(initialized.to_string()).await;
                     }
                 }
                 Ok(None) => break,
