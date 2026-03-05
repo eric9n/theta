@@ -720,9 +720,9 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     let (transformed_payload, is_init) = transform_incoming_payload(&payload);
-                    tracing::debug!("Incoming MCP payload (raw): {}", payload);
+                    tracing::info!("Incoming payload: {}", payload);
                     if transformed_payload != payload {
-                        tracing::debug!("Transformed payload: {}", transformed_payload);
+                        tracing::info!("Transformed payload: {}", transformed_payload);
                     }
                     if tx.send(transformed_payload).await.is_err() {
                         break;
