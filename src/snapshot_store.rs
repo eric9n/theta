@@ -279,6 +279,16 @@ impl SignalSnapshotStore {
         Ok(snapshots)
     }
 
+    pub fn list_symbols(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT symbol FROM market_tone_snapshots ORDER BY symbol ASC")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut symbols = Vec::new();
+        for row in rows {
+            symbols.push(row?);
+        }
+        Ok(symbols)
+    }
+
     pub fn compute_front_atm_iv_rank(
         &self,
         symbol: &str,
