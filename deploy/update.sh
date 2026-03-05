@@ -16,5 +16,12 @@ git pull --ff-only origin "${BRANCH}"
 
 cargo build --release
 
+# Automatically update the systemd service file if it targets capture-signals
+if [[ "${SERVICE_NAME}" == capture-signals* ]]; then
+    echo "Updating systemd service file for ${SERVICE_NAME}..."
+    sudo cp deploy/capture-signals.service "/etc/systemd/system/${SERVICE_NAME}.service"
+    sudo systemctl daemon-reload
+fi
+
 sudo systemctl restart "${SERVICE_NAME}"
 sudo systemctl status "${SERVICE_NAME}" --no-pager --lines=20
