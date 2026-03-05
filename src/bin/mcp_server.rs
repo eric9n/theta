@@ -62,18 +62,21 @@ impl ServerHandler for ThetaServerState {
                     description: "Get the current market tone summary and options structure for a given symbol".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": {
-                                "type": "string",
-                                "description": "Stock symbol (e.g. TSLA.US)"
-                            },
-                            "expiry": {
-                                "type": "string",
-                                "description": "Optional explicit expiry date (e.g. 2026-06-18)"
-                            },
-                            "expiries_limit": {
-                                "type": "number",
-                                "description": "Number of expiries for term structure (default 4)",
-                                "default": 4
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "Stock symbol (e.g. TSLA.US)"
+                                },
+                                "expiry": {
+                                    "type": "string",
+                                    "description": "Optional explicit expiry date (e.g. 2026-06-18)"
+                                },
+                                "expiries_limit": {
+                                    "type": "number",
+                                    "description": "Number of expiries for term structure (default 4)",
+                                    "default": 4
+                                }
                             }
                         })),
                         required: Some(vec!["symbol".to_string()]),
@@ -86,14 +89,17 @@ impl ServerHandler for ThetaServerState {
                     description: "Get historically captured market tone snapshots from the local database".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": {
-                                "type": "string",
-                                "description": "Optional stock symbol to filter by (e.g. TSLA.US)"
-                            },
-                            "limit": {
-                                "type": "number",
-                                "description": "Maximum number of records to return (default 20)",
-                                "default": 20
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "Optional stock symbol to filter by (e.g. TSLA.US)"
+                                },
+                                "limit": {
+                                    "type": "number",
+                                    "description": "Maximum number of records to return (default 20)",
+                                    "default": 20
+                                }
                             }
                         })),
                         required: None,
@@ -106,10 +112,13 @@ impl ServerHandler for ThetaServerState {
                     description: "Get volatility skew analysis for a given symbol".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date (e.g. 2026-06-18)" },
-                            "target_delta": { "type": "number", "description": "Target absolute delta", "default": 0.25 },
-                            "target_otm_percent": { "type": "number", "description": "Target OTM percent", "default": 0.05 }
+                            "type": "object",
+                            "properties": {
+                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                                "expiry": { "type": "string", "description": "Optional explicit expiry date (e.g. 2026-06-18)" },
+                                "target_delta": { "type": "number", "description": "Target absolute delta", "default": 0.25 },
+                                "target_otm_percent": { "type": "number", "description": "Target OTM percent", "default": 0.05 }
+                            }
                         })),
                         required: Some(vec!["symbol".to_string()]),
                     }),
@@ -121,8 +130,11 @@ impl ServerHandler for ThetaServerState {
                     description: "Get volatility smile analysis for a given symbol".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date" }
+                            "type": "object",
+                            "properties": {
+                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                                "expiry": { "type": "string", "description": "Optional explicit expiry date" }
+                            }
                         })),
                         required: Some(vec!["symbol".to_string()]),
                     }),
@@ -134,8 +146,11 @@ impl ServerHandler for ThetaServerState {
                     description: "Get ATM volatility term structure across expiries".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiries_limit": { "type": "number", "description": "Number of listed expiries to fetch", "default": 4 }
+                            "type": "object",
+                            "properties": {
+                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                                "expiries_limit": { "type": "number", "description": "Number of listed expiries to fetch", "default": 4 }
+                            }
                         })),
                         required: Some(vec!["symbol".to_string()]),
                     }),
@@ -147,9 +162,12 @@ impl ServerHandler for ThetaServerState {
                     description: "Get volume and open interest bias between puts and calls".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date" },
-                            "bias_min_otm_percent": { "type": "number", "description": "Minimum OTM percent for inclusion", "default": 0.05 }
+                            "type": "object",
+                            "properties": {
+                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                                "expiry": { "type": "string", "description": "Optional explicit expiry date" },
+                                "bias_min_otm_percent": { "type": "number", "description": "Minimum OTM percent for inclusion", "default": 0.05 }
+                            }
                         })),
                         required: Some(vec!["symbol".to_string()]),
                     }),
@@ -161,7 +179,10 @@ impl ServerHandler for ThetaServerState {
                     description: "Screen for symbols hitting generalized market extremes today".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                            "type": "object",
+                            "properties": {
+                                "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                            }
                         })),
                         required: None,
                     }),
@@ -173,7 +194,10 @@ impl ServerHandler for ThetaServerState {
                     description: "Find symbols moving abnormally relative to their own history".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                            "type": "object",
+                            "properties": {
+                                "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                            }
                         })),
                         required: None,
                     }),
@@ -185,7 +209,10 @@ impl ServerHandler for ThetaServerState {
                     description: "Get real-time portfolio holdings, P&L, and aggregated Greeks risk".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "margin_ratio": { "type": "number", "description": "Initial margin ratio assumption", "default": 0.3 }
+                            "type": "object",
+                            "properties": {
+                                "margin_ratio": { "type": "number", "description": "Initial margin ratio assumption", "default": 0.3 }
+                            }
                         })),
                         required: None,
                     }),
@@ -197,9 +224,12 @@ impl ServerHandler for ThetaServerState {
                     description: "Get real-time stock quote for a given symbol".to_string(),
                     input_schema: Some(ToolSchema {
                         properties: Some(json!({
-                            "symbol": {
-                                "type": "string",
-                                "description": "Stock symbol (e.g. TSLA.US)"
+                            "type": "object",
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "Stock symbol (e.g. TSLA.US)"
+                                }
                             }
                         })),
                         required: Some(vec!["symbol".to_string()]),
