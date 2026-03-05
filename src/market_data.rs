@@ -153,6 +153,11 @@ impl MarketDataClient {
 
         Ok(provider_greeks_view(row))
     }
+
+    pub async fn fetch_trading_days(&self, market: longport::Market, start: Date, end: Date) -> Result<Vec<Date>> {
+        let days = self.ctx.trading_days(market, start, end).await.context("failed to fetch trading days")?;
+        Ok(days.trading_days)
+    }
 }
 
 pub fn credentials_ready() -> bool {

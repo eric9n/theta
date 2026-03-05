@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
+use theta::accounting_service::AccountingService;
 use theta::analysis_service::ThetaAnalysisService;
 use theta::ledger::{AccountSnapshot, Ledger, TradeFilter};
 use theta::margin_engine::{self, AccountContext};
@@ -9,7 +10,7 @@ use theta::portfolio_service;
 use theta::risk_engine;
 use theta::risk_domain::EnrichedPosition;
 use std::path::PathBuf;
-use time::format_description::well_known::Rfc3339;
+use time::{Date, format_description::well_known::Rfc3339};
 
 #[derive(Parser, Debug)]
 #[command(name = "portfolio")]
@@ -64,8 +65,10 @@ enum Command {
 enum AccountAction {
     /// Set or append a new account snapshot
     Set {
-        #[arg(long, help = "Cash balance available in the account")]
-        cash_balance: f64,
+        #[arg(long, help = "Trade-date cash balance (immediate)")]
+        trade_date_cash: f64,
+        #[arg(long, help = "Settled cash balance (T+1)")]
+        settled_cash: Option<f64>,
         #[arg(long, help = "Option buying power")]
         option_buying_power: Option<f64>,
         #[arg(long, help = "Treat snapshot as a cash account (no margin enabled)")]
@@ -237,6 +240,35 @@ enum TradeAction {
         #[arg(help = "Trade ID to delete")]
         id: i64,
     },
+    /// Record a cash deposit
+    Deposit {
+        #[arg(long, help = "Amount deposited")]
+        amount: f64,
+        #[arg(long, help = "Date YYYY-MM-DD (default: today)")]
+        date: Option<String>,
+        #[arg(long, default_value = "", help = "Notes")]
+        notes: String,
+    },
+    /// Record a cash withdrawal
+    Withdraw {
+        #[arg(long, help = "Amount withdrawn")]
+        amount: f64,
+        #[arg(long, help = "Date YYYY-MM-DD (default: today)")]
+        date: Option<String>,
+        #[arg(long, default_value = "", help = "Notes")]
+        notes: String,
+    },
+    /// Record a dividend payment
+    Dividend {
+        #[arg(long, help = "Underlying symbol")]
+        underlying: String,
+        #[arg(long, help = "Amount received")]
+        amount: f64,
+        #[arg(long, help = "Date YYYY-MM-DD (default: today)")]
+        date: Option<String>,
+        #[arg(long, default_value = "", help = "Notes")]
+        notes: String,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -303,6 +335,8 @@ impl SideArg {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     let ledger = match &cli.db {
@@ -312,7 +346,26 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Account { action } => handle_account(&ledger, action),
-        Command::Trade { action } => handle_trade(&ledger, action),
+        Command::Trade { action } => match action {
+            TradeAction::SettleExpiries {
+                date,
+                underlying,
+                settlement_prices,
+                apply,
+                json,
+            } => {
+                handle_settle_expiries(
+                    &ledger,
+                    date.unwrap_or_else(today),
+                    underlying,
+                    settlement_prices,
+                    apply,
+                    json,
+                )
+                .await
+            }
+            _ => handle_trade(&ledger, action).await,
+        },
         Command::Positions { underlying, json } => handle_positions(&ledger, underlying, json),
         Command::Strategies { underlying, json } => {
             handle_strategies(&ledger, underlying, json).await
@@ -323,7 +376,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
+async fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
     match action {
         TradeAction::Buy {
             symbol, underlying, quantity, price, side,
@@ -331,12 +384,18 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
         } => {
             validate_option_fields(&side, strike, expiry.as_deref())?;
             let trade_date = date.unwrap_or_else(today);
-            let id = ledger.record_trade(
-                &trade_date, &symbol, &underlying, side.as_str(),
-                strike, expiry.as_deref(), "buy",
-                quantity, price, commission, &notes,
-            )?;
-            println!("Recorded BUY trade #{id}: {quantity} × {symbol} @ {price}");
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+            
+            ledger.with_transaction(|tx| {
+                let id = tx.record_trade(
+                    &trade_date, &symbol, &underlying, side.as_str(),
+                    strike, expiry.as_deref(), "buy",
+                    quantity, price, commission, &notes,
+                )?;
+                println!("Recorded BUY trade #{id}: {quantity} \u{00d7} {symbol} @ {price}");
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
             Ok(())
         }
         TradeAction::Sell {
@@ -345,12 +404,18 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
         } => {
             validate_option_fields(&side, strike, expiry.as_deref())?;
             let trade_date = date.unwrap_or_else(today);
-            let id = ledger.record_trade(
-                &trade_date, &symbol, &underlying, side.as_str(),
-                strike, expiry.as_deref(), "sell",
-                quantity, price, commission, &notes,
-            )?;
-            println!("Recorded SELL trade #{id}: {quantity} × {symbol} @ {price}");
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+
+            ledger.with_transaction(|tx| {
+                let id = tx.record_trade(
+                    &trade_date, &symbol, &underlying, side.as_str(),
+                    strike, expiry.as_deref(), "sell",
+                    quantity, price, commission, &notes,
+                )?;
+                println!("Recorded SELL trade #{id}: {quantity} \u{00d7} {symbol} @ {price}");
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
             Ok(())
         }
         TradeAction::Exercise {
@@ -380,6 +445,7 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                 OptionSideArg::Call => "buy",
                 OptionSideArg::Put => "sell",
             };
+            let ctx = fetch_portfolio_enrichment(ledger).await;
             let stock_id = ledger.with_transaction(|tx| {
                 record_option_close_event(
                     tx,
@@ -395,7 +461,7 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                     event_note("exercise", &notes).as_str(),
                 )?;
 
-                tx.record_adjustment_trade(
+                let sid = tx.record_adjustment_trade(
                     &trade_date,
                     &underlying,
                     &underlying,
@@ -407,10 +473,13 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                     strike,
                     0.0,
                     event_note("exercise stock delivery", &notes).as_str(),
-                )
+                )?;
+                
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(sid)
             })?;
             println!(
-                "Recorded EXERCISE: closed {quantity} × {symbol} and booked stock leg #{stock_id} ({stock_action} {stock_quantity} {underlying} @ {strike})"
+                "Recorded EXERCISE: closed {quantity} \u{00d7} {symbol} and booked stock leg #{stock_id} ({stock_action} {stock_quantity} {underlying} @ {strike})"
             );
             Ok(())
         }
@@ -441,6 +510,7 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                 OptionSideArg::Call => "sell",
                 OptionSideArg::Put => "buy",
             };
+            let ctx = fetch_portfolio_enrichment(ledger).await;
             let stock_id = ledger.with_transaction(|tx| {
                 record_option_close_event(
                     tx,
@@ -456,7 +526,7 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                     event_note("assignment", &notes).as_str(),
                 )?;
 
-                tx.record_adjustment_trade(
+                let sid = tx.record_adjustment_trade(
                     &trade_date,
                     &underlying,
                     &underlying,
@@ -468,10 +538,13 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                     strike,
                     0.0,
                     event_note("assignment stock delivery", &notes).as_str(),
-                )
+                )?;
+
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(sid)
             })?;
             println!(
-                "Recorded ASSIGNMENT: closed {quantity} × {symbol} and booked stock leg #{stock_id} ({stock_action} {stock_quantity} {underlying} @ {strike})"
+                "Recorded ASSIGNMENT: closed {quantity} \u{00d7} {symbol} and booked stock leg #{stock_id} ({stock_action} {stock_quantity} {underlying} @ {strike})"
             );
             Ok(())
         }
@@ -502,22 +575,27 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
                 PositionDirectionArg::Long => "sell",
                 PositionDirectionArg::Short => "buy",
             };
-            let id = record_option_close_event(
-                ledger,
-                &trade_date,
-                &symbol,
-                &underlying,
-                side.as_str(),
-                strike,
-                &expiry,
-                close_action,
-                quantity,
-                commission,
-                event_note("expiry", &notes).as_str(),
-            )?;
-            println!(
-                "Recorded EXPIRY adjustment #{id}: closed {quantity} × {symbol} at zero value"
-            );
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+            ledger.with_transaction(|tx| {
+                let id = record_option_close_event(
+                    tx,
+                    &trade_date,
+                    &symbol,
+                    &underlying,
+                    side.as_str(),
+                    strike,
+                    &expiry,
+                    close_action,
+                    quantity,
+                    commission,
+                    event_note("expiry", &notes).as_str(),
+                )?;
+                println!(
+                    "Recorded EXPIRY adjustment #{id}: closed {quantity} \u{00d7} {symbol} at zero value"
+                );
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
             Ok(())
         }
         TradeAction::SettleExpiries {
@@ -526,14 +604,18 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
             settlement_prices,
             apply,
             json,
-        } => handle_settle_expiries(
-            ledger,
-            date.unwrap_or_else(today),
-            underlying,
-            settlement_prices,
-            apply,
-            json,
-        ),
+        } => {
+            handle_settle_expiries(
+                ledger,
+                date.unwrap_or_else(today),
+                underlying,
+                settlement_prices,
+                apply,
+                json,
+            )
+            .await?;
+            Ok(())
+        }
         TradeAction::List { underlying, symbol, from, to, json } => {
             let filter = TradeFilter {
                 underlying,
@@ -578,6 +660,45 @@ fn handle_trade(ledger: &Ledger, action: TradeAction) -> Result<()> {
             }
             Ok(())
         }
+        TradeAction::Deposit { amount, date, notes } => {
+            let trade_date = date.unwrap_or_else(today);
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+            ledger.with_transaction(|tx| {
+                let id = tx.record_adjustment_trade(
+                    &trade_date, "CASH", "CASH", "stock", None, None, "deposit", 1, amount, 0.0, &notes,
+                )?;
+                println!("Recorded DEPOSIT #{id}: ${amount} on {trade_date}");
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
+            Ok(())
+        }
+        TradeAction::Withdraw { amount, date, notes } => {
+            let trade_date = date.unwrap_or_else(today);
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+            ledger.with_transaction(|tx| {
+                let id = tx.record_adjustment_trade(
+                    &trade_date, "CASH", "CASH", "stock", None, None, "withdraw", 1, amount, 0.0, &notes,
+                )?;
+                println!("Recorded WITHDRAWAL #{id}: ${amount} on {trade_date}");
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
+            Ok(())
+        }
+        TradeAction::Dividend { underlying, amount, date, notes } => {
+            let trade_date = date.unwrap_or_else(today);
+            let ctx = fetch_portfolio_enrichment(ledger).await;
+            ledger.with_transaction(|tx| {
+                let id = tx.record_adjustment_trade(
+                    &trade_date, &underlying, &underlying, "stock", None, None, "dividend", 1, amount, 0.0, &notes,
+                )?;
+                println!("Recorded DIVIDEND #{id}: ${amount} from {underlying} on {trade_date}");
+                record_auto_snapshot(tx, &trade_date, &ctx.enriched, ctx.calendar)?;
+                Ok(())
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -614,7 +735,7 @@ fn handle_positions(ledger: &Ledger, underlying: Option<String>, json: bool) -> 
     Ok(())
 }
 
-fn handle_settle_expiries(
+async fn handle_settle_expiries(
     ledger: &Ledger,
     settlement_date: String,
     underlying: Option<String>,
@@ -720,10 +841,12 @@ fn handle_settle_expiries(
                 );
             }
         }
+        let ctx = fetch_portfolio_enrichment(ledger).await;
         ledger.with_transaction(|tx| {
             for decision in &decisions {
                 apply_settlement_decision(tx, decision)?;
             }
+            record_auto_snapshot(tx, &settlement_date, &ctx.enriched, ctx.calendar)?;
             Ok(())
         })?;
     }
@@ -974,22 +1097,25 @@ fn event_note(label: &str, notes: &str) -> String {
 fn handle_account(ledger: &Ledger, action: AccountAction) -> Result<()> {
     match action {
         AccountAction::Set {
-            cash_balance,
+            trade_date_cash,
+            settled_cash,
             option_buying_power,
             cash_account,
             at,
             notes,
         } => {
             let snapshot_at = at.unwrap_or_else(now_rfc3339);
+            let settled = settled_cash.unwrap_or(trade_date_cash);
             let id = ledger.record_account_snapshot(
                 &snapshot_at,
-                cash_balance,
+                trade_date_cash,
+                settled,
                 option_buying_power,
                 !cash_account,
                 &notes,
             )?;
             println!(
-                "Recorded account snapshot #{id} at {snapshot_at}: cash=${cash_balance:.2}{}",
+                "Recorded account snapshot #{id} at {snapshot_at}: trade-date cash=${trade_date_cash:.2}, settled cash=${settled:.2}{}",
                 option_buying_power
                     .map(|obp| format!(", option buying power=${obp:.2}"))
                     .unwrap_or_default(),
@@ -1015,16 +1141,17 @@ fn handle_account(ledger: &Ledger, action: AccountAction) -> Result<()> {
                 println!("No account snapshots recorded.");
             } else {
                 println!(
-                    "{:>5}  {:<25}  {:>14}  {:>18}  {:<8}  {}",
-                    "ID", "TIMESTAMP", "CASH", "OPTION BP", "MARGIN", "NOTES"
+                    "{:>5}  {:<25}  {:>14}  {:>14}  {:>18}  {:<8}  {}",
+                    "ID", "TIMESTAMP", "T-CASH", "S-CASH", "OPTION BP", "MARGIN", "NOTES"
                 );
-                println!("{}", "-".repeat(96));
+                println!("{}", "-".repeat(110));
                 for snapshot in &snapshots {
                     println!(
-                        "{:>5}  {:<25}  {:>14.2}  {:>18}  {:<8}  {}",
+                        "{:>5}  {:<25}  {:>14.2}  {:>14.2}  {:>18}  {:<8}  {}",
                         snapshot.id,
                         snapshot.snapshot_at,
-                        snapshot.cash_balance,
+                        snapshot.trade_date_cash,
+                        snapshot.settled_cash,
                         snapshot
                             .option_buying_power
                             .map(|v| format!("{v:.2}"))
@@ -1072,10 +1199,11 @@ fn now_rfc3339() -> String {
 
 fn render_account_snapshot(snapshot: &AccountSnapshot) {
     println!("Account snapshot #{}", snapshot.id);
-    println!("  at            : {}", snapshot.snapshot_at);
-    println!("  cash balance  : ${:.2}", snapshot.cash_balance);
+    println!("  at              : {}", snapshot.snapshot_at);
+    println!("  trade-date cash : ${:.2}", snapshot.trade_date_cash);
+    println!("  settled cash    : ${:.2}", snapshot.settled_cash);
     println!(
-        "  option bp     : {}",
+        "  option bp       : {}",
         snapshot
             .option_buying_power
             .map(|v| format!("${v:.2}"))
@@ -1106,7 +1234,8 @@ async fn handle_strategies(ledger: &Ledger, underlying: Option<String>, json: bo
         .latest_account_snapshot()?
         .ok_or_else(|| anyhow::anyhow!("no account snapshot found; run `portfolio account set ...` first"))?;
     let account = AccountContext {
-        cash_balance: Some(account_snapshot.cash_balance),
+        trade_date_cash: Some(account_snapshot.trade_date_cash),
+        settled_cash: Some(account_snapshot.settled_cash),
         option_buying_power: account_snapshot.option_buying_power,
         margin_enabled: account_snapshot.margin_enabled,
     };
@@ -1140,9 +1269,10 @@ async fn handle_strategies(ledger: &Ledger, underlying: Option<String>, json: bo
     }
 
     println!(
-        "Account snapshot: {} | cash=${:.2} | option bp={}",
+        "Account snapshot: {} | t-cash=${:.2} | s-cash=${:.2} | option bp={}",
         account_snapshot.snapshot_at,
-        account_snapshot.cash_balance,
+        account_snapshot.trade_date_cash,
+        account_snapshot.settled_cash,
         account_snapshot
             .option_buying_power
             .map(|v| format!("${v:.2}"))
@@ -1201,7 +1331,8 @@ async fn handle_report(
         .latest_account_snapshot()?
         .ok_or_else(|| anyhow::anyhow!("no account snapshot found; run `portfolio account set ...` first"))?;
     let account = AccountContext {
-        cash_balance: Some(account_snapshot.cash_balance),
+        trade_date_cash: Some(account_snapshot.trade_date_cash),
+        settled_cash: Some(account_snapshot.settled_cash),
         option_buying_power: account_snapshot.option_buying_power,
         margin_enabled: account_snapshot.margin_enabled,
     };
@@ -1268,7 +1399,8 @@ async fn handle_report(
     // -- Account --
     println!("\u{2550}\u{2550}\u{2550} ACCOUNT \u{2550}\u{2550}\u{2550}");
     println!("Snapshot        : {}", account_snapshot.snapshot_at);
-    println!("Cash balance    : ${:.2}", account_snapshot.cash_balance);
+    println!("Trade-date Cash : ${:.2}", account_snapshot.trade_date_cash);
+    println!("Settled Cash    : ${:.2}", account_snapshot.settled_cash);
     println!(
         "Option BP       : {}",
         account_snapshot
@@ -1379,5 +1511,77 @@ async fn handle_report(
         println!("Unrealized P&L  : ${:.2}", total_pnl);
     }
 
+    Ok(())
+}
+
+struct MarketContext {
+    enriched: Vec<EnrichedPosition>,
+    calendar: Option<Vec<Date>>,
+}
+
+async fn fetch_portfolio_enrichment(ledger: &Ledger) -> MarketContext {
+    let positions = ledger.calculate_positions(None).unwrap_or_default();
+    
+    let Ok(svc) = ThetaAnalysisService::from_env().await else {
+        return MarketContext {
+            enriched: Vec::new(),
+            calendar: None,
+        };
+    };
+
+    let enriched = portfolio_service::enrich_positions(&svc, &positions)
+        .await
+        .unwrap_or_default();
+
+    // Fetch trading days for settlement logic (e.g., current month and surrounding)
+    let today = time::OffsetDateTime::now_utc().date();
+    let start = today - time::Duration::days(60); // Cover historical trades in recent history
+    let end = today + time::Duration::days(30);
+
+    let calendar = svc.market().fetch_trading_days(longport::Market::US, start, end).await.ok();
+
+    MarketContext { enriched, calendar }
+}
+
+fn record_auto_snapshot(
+    ledger: &Ledger,
+    trade_date: &str,
+    enriched: &[EnrichedPosition],
+    trading_calendar: Option<Vec<Date>>,
+) -> Result<()> {
+    let mut service = AccountingService::new(ledger);
+    if let Some(calendar) = trading_calendar {
+        service = service.with_calendar(calendar);
+    }
+    let (trade_cash, settled_cash) = service.derive_balances(trade_date)?;
+
+    let last_snapshot = ledger.latest_account_snapshot()?;
+    let margin_enabled = last_snapshot.as_ref().map(|s| s.margin_enabled).unwrap_or(true);
+
+    let positions = ledger.calculate_positions(None)?;
+    let strategies = risk_engine::identify_strategies(&positions);
+    
+    let account_ctx = AccountContext {
+        trade_date_cash: Some(trade_cash),
+        settled_cash: Some(settled_cash),
+        option_buying_power: None,
+        margin_enabled,
+    };
+
+    let evaluated = margin_engine::evaluate_strategies(&strategies, enriched, &account_ctx);
+    let total_margin: f64 = evaluated.iter().map(|s| s.margin.margin_required).sum();
+    let buying_power = trade_cash - total_margin;
+
+    let snapshot_at = now_rfc3339();
+    ledger.record_account_snapshot(
+        &snapshot_at,
+        trade_cash,
+        settled_cash,
+        Some(buying_power),
+        margin_enabled,
+        &format!("auto-update after trade on {trade_date}"),
+    )?;
+
+    println!("Auto-updated account snapshot: T-Cash=${trade_cash:.2}, S-Cash=${settled_cash:.2}, Buying Power=${buying_power:.2}");
     Ok(())
 }

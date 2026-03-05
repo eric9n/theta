@@ -56,8 +56,10 @@ pub struct Position {
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountSnapshot {
     pub id: i64,
+    /// ISO8601 timestamp
     pub snapshot_at: String,
-    pub cash_balance: f64,
+    pub trade_date_cash: f64,
+    pub settled_cash: f64,
     pub option_buying_power: Option<f64>,
     pub margin_enabled: bool,
     pub notes: String,
@@ -131,7 +133,8 @@ impl Ledger {
             CREATE TABLE IF NOT EXISTS account_snapshots (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 snapshot_at         TEXT    NOT NULL,
-                cash_balance        REAL    NOT NULL,
+                trade_date_cash     REAL    NOT NULL,
+                settled_cash        REAL    NOT NULL,
                 option_buying_power REAL,
                 margin_enabled      INTEGER NOT NULL,
                 notes               TEXT    NOT NULL DEFAULT ''
@@ -242,7 +245,7 @@ impl Ledger {
         allow_zero_price: bool,
     ) -> Result<i64> {
         ensure!(matches!(side, "call" | "put" | "stock"), "invalid side: {side}");
-        ensure!(matches!(action, "buy" | "sell"), "invalid action: {action}");
+        ensure!(matches!(action, "buy" | "sell" | "deposit" | "withdraw" | "dividend"), "invalid action: {action}");
         ensure!(quantity > 0, "quantity must be positive");
         if allow_zero_price {
             ensure!(price >= 0.0, "price must be non-negative");
@@ -271,20 +274,22 @@ impl Ledger {
     pub fn record_account_snapshot(
         &self,
         snapshot_at: &str,
-        cash_balance: f64,
+        trade_date_cash: f64,
+        settled_cash: f64,
         option_buying_power: Option<f64>,
         margin_enabled: bool,
         notes: &str,
     ) -> Result<i64> {
-        ensure!(cash_balance >= 0.0, "cash_balance must be non-negative");
+        ensure!(trade_date_cash >= 0.0, "trade_date_cash must be non-negative");
+        ensure!(settled_cash >= 0.0, "settled_cash must be non-negative");
         if let Some(obp) = option_buying_power {
             ensure!(obp >= 0.0, "option_buying_power must be non-negative");
         }
 
         self.conn.execute(
-            "INSERT INTO account_snapshots (snapshot_at, cash_balance, option_buying_power, margin_enabled, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![snapshot_at, cash_balance, option_buying_power, margin_enabled, notes],
+            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -471,7 +476,7 @@ impl Ledger {
 
     pub fn list_account_snapshots(&self, limit: usize) -> Result<Vec<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, cash_balance, option_buying_power, margin_enabled, notes
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes
              FROM account_snapshots
              ORDER BY snapshot_at DESC, id DESC
              LIMIT ?1",
@@ -480,10 +485,11 @@ impl Ledger {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
-                cash_balance: row.get(2)?,
-                option_buying_power: row.get(3)?,
-                margin_enabled: row.get(4)?,
-                notes: row.get(5)?,
+                trade_date_cash: row.get(2)?,
+                settled_cash: row.get(3)?,
+                option_buying_power: row.get(4)?,
+                margin_enabled: row.get(5)?,
+                notes: row.get(6)?,
             })
         })?;
 
@@ -699,6 +705,7 @@ mod tests {
             .record_account_snapshot(
                 "2026-03-02T09:30:00Z",
                 50_000.0,
+                50_000.0,
                 Some(120_000.0),
                 true,
                 "initial snapshot",
@@ -707,7 +714,8 @@ mod tests {
         assert_eq!(id, 1);
 
         let latest = ledger.latest_account_snapshot().unwrap().expect("snapshot");
-        assert_eq!(latest.cash_balance, 50_000.0);
+        assert_eq!(latest.trade_date_cash, 50_000.0);
+        assert_eq!(latest.settled_cash, 50_000.0);
         assert_eq!(latest.option_buying_power, Some(120_000.0));
         assert!(latest.margin_enabled);
         assert_eq!(latest.notes, "initial snapshot");

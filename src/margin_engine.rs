@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct AccountContext {
-    pub cash_balance: Option<f64>,
+    pub trade_date_cash: Option<f64>,
+    pub settled_cash: Option<f64>,
     pub option_buying_power: Option<f64>,
     pub margin_enabled: bool,
 }
@@ -14,7 +15,7 @@ pub fn evaluate_strategies(
     positions: &[EnrichedPosition],
     account: &AccountContext,
 ) -> Vec<IdentifiedStrategy> {
-    let mut remaining_cash = account.cash_balance.unwrap_or(0.0);
+    let mut remaining_cash = account.trade_date_cash.unwrap_or(0.0);
     let mut spot_by_underlying = HashMap::new();
     for position in positions {
         if let Some(spot) = position.underlying_spot {
@@ -342,7 +343,8 @@ mod tests {
             &strategies,
             &positions,
             &AccountContext {
-                cash_balance: Some(40_000.0),
+                trade_date_cash: Some(40_000.0),
+                settled_cash: Some(40_000.0),
                 option_buying_power: None,
                 margin_enabled: true,
             },

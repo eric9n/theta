@@ -1,3 +1,4 @@
+pub mod accounting_service;
 pub mod analytics;
 pub mod analysis_service;
 pub mod config;
