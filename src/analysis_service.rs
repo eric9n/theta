@@ -157,7 +157,7 @@ impl ThetaAnalysisService {
         let days_to_expiry = chain.days_to_expiry;
 
         for contract in chain.contracts {
-            let (effective_iv, iv_source, _) = resolve_iv(
+            let (effective_iv, iv_source, _) = match resolve_iv(
                 req.iv,
                 None,
                 req.iv_from_market_price,
@@ -169,7 +169,19 @@ impl ThetaAnalysisService {
                 req.dividend,
                 contract.option_type,
                 contract.provider_reported_iv_f64,
-            )?;
+            ) {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!("Skipping contract {} due to IV resolution error: {}", contract.symbol, e);
+                    continue;
+                }
+            };
+
+            if effective_iv <= 0.0 {
+                tracing::warn!("Skipping contract {} due to invalid 0.0 IV", contract.symbol);
+                continue;
+            }
+
             inputs.push(PricingInput::new(
                 underlying_spot,
                 contract.strike_price_f64,
