@@ -660,7 +660,13 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting theta MCP server via mcp-sdk-rs");
 
-    let service = ThetaSignalService::from_env().await?;
+    let service = match ThetaSignalService::from_env().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to initialize ThetaSignalService: {}", e);
+            return Err(e);
+        }
+    };
     let db_path = default_db_path()?;
     let state = Arc::new(ThetaServerState { service, db_path });
 
