@@ -581,6 +581,13 @@ async fn read_next_mcp_payload(
     }
 }
 
+fn is_initialize_request(payload: &str) -> bool {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
+        .is_some_and(|m| m == "initialize")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -620,8 +627,17 @@ async fn main() -> Result<()> {
                     if payload.trim().is_empty() {
                         continue;
                     }
+                    let is_init = is_initialize_request(&payload);
                     if tx.send(payload).await.is_err() {
                         break;
+                    }
+                    // Compatibility: some clients skip the MCP `initialized` notification.
+                    // mcp-sdk-rs gates all methods on that flag, so we synthesize it once.
+                    if is_init {
+                        let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+                        if tx.send(initialized.to_string()).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Ok(None) => break,
