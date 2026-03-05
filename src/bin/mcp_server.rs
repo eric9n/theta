@@ -488,6 +488,11 @@ fn default_db_path() -> Result<std::path::PathBuf> {
 
 #[tokio::main]
 async fn main() -> SdkResult<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     // Attempt to load environment from standard config paths
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let config_dir = std::path::PathBuf::from(home).join(".config").join("theta");
@@ -501,18 +506,13 @@ async fn main() -> SdkResult<()> {
     for path in config_paths {
         if path.exists() {
             if let Err(e) = dotenvy::from_path(&path) {
-                eprintln!("Warning: failed to load config from {:?}: {}", path, e);
+                tracing::warn!("Failed to load config from {:?}: {}", path, e);
             } else {
-                eprintln!("Loaded config from {:?}", path);
+                tracing::info!("Loaded config from {:?}", path);
                 break;
             }
         }
     }
-
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
 
     rustls::crypto::ring::default_provider()
         .install_default()
