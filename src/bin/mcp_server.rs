@@ -520,6 +520,67 @@ fn default_db_path() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home).join(".theta").join("signals.db"))
 }
 
+async fn write_mcp_message(msg: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stdout = tokio::io::stdout();
+    let bytes = msg.as_bytes();
+    let header = format!("Content-Length: {}\r\n\r\n", bytes.len());
+    stdout.write_all(header.as_bytes()).await?;
+    stdout.write_all(bytes).await?;
+    stdout.flush().await?;
+    Ok(())
+}
+
+async fn read_next_mcp_payload(
+    reader: &mut tokio::io::BufReader<tokio::io::Stdin>,
+    line: &mut String,
+) -> std::io::Result<Option<String>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    line.clear();
+    let n = reader.read_line(line).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+
+    let lower = line.to_ascii_lowercase();
+    if lower.starts_with("content-length:") {
+        let len_str = line
+            .split(':')
+            .nth(1)
+            .map(str::trim)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length header"))?;
+        let content_len = len_str
+            .parse::<usize>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid Content-Length: {e}")))?;
+
+        loop {
+            line.clear();
+            let m = reader.read_line(line).await?;
+            if m == 0 {
+                return Ok(None);
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+
+        let mut payload = vec![0_u8; content_len];
+        reader.read_exact(&mut payload).await?;
+        let json = String::from_utf8(payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        return Ok(Some(json));
+    }
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        Ok(Some(String::new()))
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -537,28 +598,38 @@ async fn main() -> Result<()> {
     let (tx_out, mut rx_out) = tokio::sync::mpsc::channel::<String>(100);
 
     let transport = Arc::new(StdioTransport::new(rx, tx_out));
-
     let server = Server::new(transport.clone(), state);
 
     tokio::spawn(async move {
         while let Some(msg) = rx_out.recv().await {
-            println!("{}", msg);
+            if let Err(e) = write_mcp_message(&msg).await {
+                tracing::error!("Failed to write MCP response: {}", e);
+                break;
+            }
         }
     });
 
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
         let stdin = tokio::io::stdin();
         let mut reader = tokio::io::BufReader::new(stdin);
-        let mut buffer = String::new();
-        while let Ok(n) = reader.read_line(&mut buffer).await {
-            if n == 0 {
-                break;
+        let mut line = String::new();
+
+        loop {
+            match read_next_mcp_payload(&mut reader, &mut line).await {
+                Ok(Some(payload)) => {
+                    if payload.trim().is_empty() {
+                        continue;
+                    }
+                    if tx.send(payload).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("Failed to read MCP request: {}", e);
+                    break;
+                }
             }
-            if !buffer.trim().is_empty() {
-                let _ = tx.send(buffer.clone()).await;
-            }
-            buffer.clear();
         }
     });
 
