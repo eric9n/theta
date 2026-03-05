@@ -35,9 +35,10 @@ fn get_f64_arg(args: Option<&Value>, key: &str) -> Result<Option<f64>, Error> {
 impl ServerHandler for ThetaServerState {
     async fn initialize(
         &self,
-        _implementation: Implementation,
-        _capabilities: ClientCapabilities,
+        implementation: Implementation,
+        capabilities: ClientCapabilities,
     ) -> Result<ServerCapabilities, Error> {
+        tracing::info!("Initializing with implementation: {:?}, capabilities: {:?}", implementation, capabilities);
         Ok(ServerCapabilities {
             tools: Some(json!({
                 "listChanged": false
@@ -671,6 +672,7 @@ async fn main() -> Result<()> {
         }
     };
     let db_path = default_db_path()?;
+    tracing::info!("Using database path: {:?}", db_path);
     let state = Arc::new(ThetaServerState { service, db_path });
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);
