@@ -1,747 +1,556 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use mcp_sdk_rs::{
-    error::Error,
-    server::{Server, ServerHandler},
-    transport::stdio::StdioTransport,
-    types::{
-        ClientCapabilities, Implementation, ServerCapabilities, Tool, ToolSchema,
-    },
+use rust_mcp_sdk::{
+    error::SdkResult,
+    macros::{self, mcp_tool},
+    mcp_server::{server_runtime, McpServerOptions, ServerHandler},
+    schema::*,
+    StdioTransport, TransportOptions,
+    McpServer, ToMcpServerHandler,
 };
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
-use theta::ledger::{AccountSnapshot, Ledger};
+
+use theta::ledger::{AccountSnapshot, Ledger, Position};
 use theta::portfolio_service;
 use theta::risk_engine;
 use theta::margin_engine::{self, AccountContext};
 use theta::signal_service::{
-    MarketToneRequest, ThetaSignalService,
+    MarketToneRequest, ThetaSignalService, SkewSignalRequest, TermStructureRequest,
+    SmileSignalRequest, PutCallBiasRequest,
 };
 use theta::snapshot_store::SignalSnapshotStore;
 
+#[derive(Clone)]
 struct ThetaServerState {
-    service: ThetaSignalService,
+    service: Arc<ThetaSignalService>,
     db_path: std::path::PathBuf,
 }
 
-// Helper functions to safely extract arguments
-fn get_f64_arg(args: Option<&Value>, key: &str) -> Result<Option<f64>, Error> {
-    Ok(args
-        .and_then(|a| a.get(key))
-        .and_then(|v| v.as_f64()))
+// --- Tool Argument Structs using mcp_tool macro ---
+
+#[mcp_tool(
+    name = "get_market_tone",
+    description = "Get the current market tone summary and options structure for a given symbol"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetMarketToneArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+    /// Optional explicit expiry date (e.g. 2026-06-18)
+    expiry: Option<String>,
+    /// Number of expiries for term structure (default 4)
+    expiries_limit: Option<u32>,
+}
+
+#[mcp_tool(
+    name = "get_signal_history",
+    description = "Get historically captured market tone snapshots from the local database"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetSignalHistoryArgs {
+    /// Optional stock symbol to filter by (e.g. TSLA.US)
+    symbol: Option<String>,
+    /// Maximum number of records to return (default 20)
+    limit: Option<u32>,
+}
+
+#[mcp_tool(
+    name = "get_skew",
+    description = "Get volatility skew analysis for a given symbol"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetSkewArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+    /// Optional explicit expiry date (e.g. 2026-06-18)
+    expiry: Option<String>,
+    /// Target absolute delta (default 0.25)
+    target_delta: Option<f64>,
+    /// Target OTM percent (default 0.05)
+    target_otm_percent: Option<f64>,
+}
+
+#[mcp_tool(
+    name = "get_smile",
+    description = "Get volatility smile analysis for a given symbol"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetSmileArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+    /// Optional explicit expiry date
+    expiry: Option<String>,
+}
+
+#[mcp_tool(
+    name = "get_term_structure",
+    description = "Get ATM volatility term structure across expiries"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetTermStructureArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+    /// Number of listed expiries to fetch (default 4)
+    expiries_limit: Option<u32>,
+}
+
+#[mcp_tool(
+    name = "get_put_call_bias",
+    description = "Get volume and open interest bias between puts and calls"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetPutCallBiasArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+    /// Optional explicit expiry date
+    expiry: Option<String>,
+    /// Minimum OTM percent for inclusion (default 0.05)
+    bias_min_otm_percent: Option<f64>,
+}
+
+#[mcp_tool(
+    name = "get_market_extreme",
+    description = "Screen for symbols hitting generalized market extremes today"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetMarketExtremeArgs {
+    /// Max results to return (default 20)
+    limit: Option<u32>,
+}
+
+#[mcp_tool(
+    name = "get_relative_extreme",
+    description = "Find symbols moving abnormally relative to their own history"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetRelativeExtremeArgs {
+    /// Max results to return (default 20)
+    limit: Option<u32>,
+}
+
+#[mcp_tool(
+    name = "get_portfolio",
+    description = "Get real-time portfolio holdings, P&L, and aggregated Greeks risk"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetPortfolioArgs {
+    /// Initial margin ratio assumption (default 0.3)
+    margin_ratio: Option<f64>,
+}
+
+#[mcp_tool(
+    name = "get_stock_quote",
+    description = "Get real-time stock quote for a given symbol"
+)]
+#[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+struct GetStockQuoteArgs {
+    /// Stock symbol (e.g. TSLA.US)
+    symbol: String,
+}
+
+// --- Implementation of ServerHandler ---
+
+struct ThetaHandler {
+    state: Arc<ThetaServerState>,
+}
+
+impl ThetaHandler {
+    fn parse_args<T: serde::de::DeserializeOwned>(&self, args: Option<serde_json::Map<String, Value>>) -> Result<T, CallToolError> {
+        serde_json::from_value(Value::Object(args.unwrap_or_default()))
+            .map_err(|e| CallToolError::from_message(format!("Invalid arguments: {}", e)))
+    }
 }
 
 #[async_trait]
-impl ServerHandler for ThetaServerState {
-    async fn initialize(
+impl ServerHandler for ThetaHandler {
+    async fn handle_list_tools_request(
         &self,
-        implementation: Implementation,
-        capabilities: ClientCapabilities,
-    ) -> Result<ServerCapabilities, Error> {
-        tracing::info!("Initializing with implementation: {:?}, capabilities: {:?}", implementation, capabilities);
-        Ok(ServerCapabilities {
-            tools: Some(json!({
-                "listChanged": false
-            })),
-            ..Default::default()
+        _request: Option<PaginatedRequestParams>,
+        _runtime: Arc<dyn McpServer>,
+    ) -> Result<ListToolsResult, RpcError> {
+        Ok(ListToolsResult {
+            tools: vec![
+                GetStockQuoteArgs::tool(),
+                GetMarketToneArgs::tool(),
+                GetSignalHistoryArgs::tool(),
+                GetSkewArgs::tool(),
+                GetSmileArgs::tool(),
+                GetTermStructureArgs::tool(),
+                GetPutCallBiasArgs::tool(),
+                GetMarketExtremeArgs::tool(),
+                GetRelativeExtremeArgs::tool(),
+                GetPortfolioArgs::tool(),
+            ],
+            meta: None,
+            next_cursor: None,
         })
     }
 
-    async fn shutdown(&self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn handle_method(
+    async fn handle_call_tool_request(
         &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, Error> {
-        tracing::info!("Handling method: {} with params: {:?}", method, params);
-        match method {
-            "notifications/initialized" | "initialized" => {
-                tracing::info!("Client confirmed initialization");
-                Ok(json!({}))
-            }
-            "tools/list" => {
-                let get_market_tone_tool = json!({
-                    "name": "get_market_tone",
-                    "description": "Get the current market tone summary and options structure for a given symbol",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": {
-                                "type": "string",
-                                "description": "Stock symbol (e.g. TSLA.US)"
-                            },
-                            "expiry": {
-                                "type": "string",
-                                "description": "Optional explicit expiry date (e.g. 2026-06-18)"
-                            },
-                            "expiries_limit": {
-                                "type": "number",
-                                "description": "Number of expiries for term structure (default 4)",
-                                "default": 4
-                            }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-                let get_signal_history_tool = json!({
-                    "name": "get_signal_history",
-                    "description": "Get historically captured market tone snapshots from the local database",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": {
-                                "type": "string",
-                                "description": "Optional stock symbol to filter by (e.g. TSLA.US)"
-                            },
-                            "limit": {
-                                "type": "number",
-                                "description": "Maximum number of records to return (default 20)",
-                                "default": 20
-                            }
-                        }
-                    }
-                });
-
-                let get_skew_tool = json!({
-                    "name": "get_skew",
-                    "description": "Get volatility skew analysis for a given symbol",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date (e.g. 2026-06-18)" },
-                            "target_delta": { "type": "number", "description": "Target absolute delta", "default": 0.25 },
-                            "target_otm_percent": { "type": "number", "description": "Target OTM percent", "default": 0.05 }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-                let get_smile_tool = json!({
-                    "name": "get_smile",
-                    "description": "Get volatility smile analysis for a given symbol",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date" }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-                let get_term_structure_tool = json!({
-                    "name": "get_term_structure",
-                    "description": "Get ATM volatility term structure across expiries",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiries_limit": { "type": "number", "description": "Number of listed expiries to fetch", "default": 4 }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-                let get_put_call_bias_tool = json!({
-                    "name": "get_put_call_bias",
-                    "description": "Get volume and open interest bias between puts and calls",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                            "expiry": { "type": "string", "description": "Optional explicit expiry date" },
-                            "bias_min_otm_percent": { "type": "number", "description": "Minimum OTM percent for inclusion", "default": 0.05 }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-                let get_market_extreme_tool = json!({
-                    "name": "get_market_extreme",
-                    "description": "Screen for symbols hitting generalized market extremes today",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
-                        }
-                    }
-                });
-
-                let get_relative_extreme_tool = json!({
-                    "name": "get_relative_extreme",
-                    "description": "Find symbols moving abnormally relative to their own history",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
-                        }
-                    }
-                });
-
-                let get_portfolio_tool = json!({
-                    "name": "get_portfolio",
-                    "description": "Get real-time portfolio holdings, P&L, and aggregated Greeks risk",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "margin_ratio": { "type": "number", "description": "Initial margin ratio assumption", "default": 0.3 }
-                        }
-                    }
-                });
-
-                let get_stock_quote_tool = json!({
-                    "name": "get_stock_quote",
-                    "description": "Get real-time stock quote for a given symbol",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": {
-                                "type": "string",
-                                "description": "Stock symbol (e.g. TSLA.US)"
-                            }
-                        },
-                        "required": ["symbol"]
-                    }
-                });
-
-
-
-                Ok(json!({
-                    "tools": [
-                        get_market_tone_tool,
-                        get_signal_history_tool,
-                        get_skew_tool,
-                        get_smile_tool,
-                        get_term_structure_tool,
-                        get_put_call_bias_tool,
-                        get_market_extreme_tool,
-                        get_relative_extreme_tool,
-                        get_portfolio_tool,
-                        get_stock_quote_tool
-                    ]
-                }))
-            }
-            "tools/call" => {
-                let params = params.unwrap_or_default();
-                let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = params.get("arguments");
-
-                match tool_name {
-                    "get_stock_quote" => {
-                        let symbol = args
-                            .and_then(|a| a.get("symbol"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("TSLA.US")
-                            .to_string();
-
-                        match self.service.stock_quote(&symbol).await {
-                            Ok(quote) => {
-                                let json_val = serde_json::to_string_pretty(&quote).unwrap_or_default();
-                                Ok(json!({
-                                    "content": [{"type": "text", "text": json_val}],
-                                    "isError": false
-                                }))
-                            }
-                            Err(e) => Ok(json!({
-                                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                                "isError": true
-                            })),
-                        }
-                    }
-                    "get_market_tone" => {
-                        let symbol = args
-                            .and_then(|a| a.get("symbol"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("TSLA.US")
-                            .to_string();
-
-                        let expiries_limit = args
-                            .and_then(|a| a.get("expiries_limit"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(4) as usize;
-
-                        let explicit_expiry = args
-                            .and_then(|a| a.get("expiry"))
-                            .and_then(|v| v.as_str());
-
-                        let expiry = if let Some(dt) = explicit_expiry {
-                            match theta::market_data::parse_expiry_date(dt) {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({
-                                    "content": [{"type": "text", "text": format!("Error parsing expiry: {}", e)}],
-                                    "isError": true
-                                })),
-                            }
-                        } else {
-                            match self.service.front_expiry_for_symbol(&symbol).await {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({
-                                    "content": [{"type": "text", "text": format!("Error fetching front expiry: {}", e)}],
-                                    "isError": true
-                                })),
-                            }
-                        };
-
-                        let tone_req = MarketToneRequest {
-                            symbol: symbol.clone(),
-                            expiry,
-                            expiries_limit,
-                            rate: None,
-                            dividend: 0.0,
-                            iv: None,
-                            iv_from_market_price: true,
-                            target_delta: 0.25,
-                            target_otm_percent: 0.05,
-                            smile_target_otm_percents: vec![0.05, 0.10, 0.15],
-                            bias_min_otm_percent: 0.05,
-                        };
-
-                        match self.service.market_tone(tone_req).await {
-                            Ok(view) => {
-                                let json_val = serde_json::to_string_pretty(&view).unwrap_or_default();
-                                Ok(json!({
-                                    "content": [{"type": "text", "text": json_val}],
-                                    "isError": false
-                                }))
-                            }
-                            Err(e) => Ok(json!({
-                                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                                "isError": true
-                            })),
-                        }
-                    }
-                    "get_signal_history" => {
-                        let symbol = args
-                            .and_then(|a| a.get("symbol"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        let limit = args
-                            .and_then(|a| a.get("limit"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(20) as usize;
-
-                        let store = match SignalSnapshotStore::open(&self.db_path) {
-                            Ok(s) => s,
-                            Err(e) => return Ok(json!({
-                                "content": [{"type": "text", "text": format!("Failed to open db: {}", e)}],
-                                "isError": true
-                            })),
-                        };
-
-                        match store.list_market_tone_snapshots(symbol.as_deref(), limit) {
-                            Ok(rows) => {
-                                let json_val = serde_json::to_string_pretty(&rows).unwrap_or_default();
-                                Ok(json!({
-                                    "content": [{"type": "text", "text": json_val}],
-                                    "isError": false
-                                }))
-                            }
-                            Err(e) => Ok(json!({
-                                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                                "isError": true
-                            })),
-                        }
-                    }
-                    "get_skew" => {
-                        let symbol = args.and_then(|a| a.get("symbol")).and_then(|v| v.as_str()).unwrap_or("TSLA.US").to_string();
-                        let explicit_expiry = args.and_then(|a| a.get("expiry")).and_then(|v| v.as_str());
-                        let target_delta = args.and_then(|a| a.get("target_delta")).and_then(|v| v.as_f64()).unwrap_or(0.25);
-                        let target_otm_percent = args.and_then(|a| a.get("target_otm_percent")).and_then(|v| v.as_f64()).unwrap_or(0.05);
-
-                        let expiry = if let Some(dt) = explicit_expiry {
-                            match theta::market_data::parse_expiry_date(dt) {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error parsing expiry: {}", e)}], "isError": true })),
-                            }
-                        } else {
-                            match self.service.front_expiry_for_symbol(&symbol).await {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error fetching front expiry: {}", e)}], "isError": true })),
-                            }
-                        };
-
-                        let req = theta::signal_service::SkewSignalRequest { symbol, expiry, rate: None, dividend: 0.0, iv: None, iv_from_market_price: true, target_delta, target_otm_percent };
-                        match self.service.skew(req).await {
-                            Ok(view) => Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&view).unwrap_or_default()}], "isError": false })),
-                            Err(e) => Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true })),
-                        }
-                    }
-                    "get_smile" => {
-                        let symbol = args.and_then(|a| a.get("symbol")).and_then(|v| v.as_str()).unwrap_or("TSLA.US").to_string();
-                        let explicit_expiry = args.and_then(|a| a.get("expiry")).and_then(|v| v.as_str());
-
-                        let expiry = if let Some(dt) = explicit_expiry {
-                            match theta::market_data::parse_expiry_date(dt) {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error parsing expiry: {}", e)}], "isError": true })),
-                            }
-                        } else {
-                            match self.service.front_expiry_for_symbol(&symbol).await {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error fetching front expiry: {}", e)}], "isError": true })),
-                            }
-                        };
-
-                        let req = theta::signal_service::SmileSignalRequest { symbol, expiry, rate: None, dividend: 0.0, iv: None, iv_from_market_price: true, target_otm_percents: vec![0.05, 0.10, 0.15] };
-                        match self.service.smile(req).await {
-                            Ok(view) => Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&view).unwrap_or_default()}], "isError": false })),
-                            Err(e) => Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true })),
-                        }
-                    }
-                    "get_term_structure" => {
-                        let symbol = args.and_then(|a| a.get("symbol")).and_then(|v| v.as_str()).unwrap_or("TSLA.US").to_string();
-                        let expiries_limit = args.and_then(|a| a.get("expiries_limit")).and_then(|v| v.as_u64()).unwrap_or(4) as usize;
-
-                        let req = theta::signal_service::TermStructureRequest { symbol, expiries_limit, rate: None, dividend: 0.0, iv: None, iv_from_market_price: true };
-                        match self.service.term_structure(req).await {
-                            Ok(view) => Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&view).unwrap_or_default()}], "isError": false })),
-                            Err(e) => Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true })),
-                        }
-                    }
-                    "get_put_call_bias" => {
-                        let symbol = args.and_then(|a| a.get("symbol")).and_then(|v| v.as_str()).unwrap_or("TSLA.US").to_string();
-                        let explicit_expiry = args.and_then(|a| a.get("expiry")).and_then(|v| v.as_str());
-                        let min_otm_percent = args.and_then(|a| a.get("bias_min_otm_percent")).and_then(|v| v.as_f64()).unwrap_or(0.05);
-
-                        let expiry = if let Some(dt) = explicit_expiry {
-                            match theta::market_data::parse_expiry_date(dt) {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error parsing expiry: {}", e)}], "isError": true })),
-                            }
-                        } else {
-                            match self.service.front_expiry_for_symbol(&symbol).await {
-                                Ok(exp) => exp,
-                                Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error fetching front expiry: {}", e)}], "isError": true })),
-                            }
-                        };
-
-                        let req = theta::signal_service::PutCallBiasRequest { symbol, expiry, rate: None, dividend: 0.0, iv: None, iv_from_market_price: true, min_otm_percent };
-                        match self.service.put_call_bias(req).await {
-                            Ok(view) => Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&view).unwrap_or_default()}], "isError": false })),
-                            Err(e) => Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true })),
-                        }
-                    }
-                    "get_market_extreme" => {
-                        let limit = get_f64_arg(args, "limit").ok().flatten().unwrap_or(20.0) as usize;
-                        let store = match SignalSnapshotStore::open_default() {
-                            Ok(s) => s,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true }))
-                        };
-                        let mut results = Vec::new();
-                        if let Ok(symbols) = store.list_symbols() {
-                            for symbol in symbols {
-                                if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
-                                    results.push(row);
-                                }
-                            }
-                        }
-                        results.sort_by(|a, b| {
-                            let a_z = a.open_interest_bias_ratio.as_ref().and_then(|m| m.z_score).unwrap_or(0.0).abs();
-                            let b_z = b.open_interest_bias_ratio.as_ref().and_then(|m| m.z_score).unwrap_or(0.0).abs();
-                            b_z.partial_cmp(&a_z).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        results.truncate(limit);
-                        Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&results).unwrap_or_default()}] }))
-                    }
-                    "get_relative_extreme" => {
-                        let limit = get_f64_arg(args, "limit").ok().flatten().unwrap_or(20.0) as usize;
-                        let store = match SignalSnapshotStore::open_default() {
-                            Ok(s) => s,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error: {}", e)}], "isError": true }))
-                        };
-                        let benchmark_symbol = "QQQ.US";
-                        let mut results = Vec::new();
-                        
-                        if let Ok(Some(benchmark)) = store.compute_market_extreme(benchmark_symbol, limit) {
-                            if let Ok(symbols) = store.list_symbols() {
-                                for symbol in symbols {
-                                    if symbol != benchmark_symbol {
-                                        if let Ok(Some(primary)) = store.compute_market_extreme(&symbol, limit) {
-                                            let p_z = primary.open_interest_bias_ratio.as_ref().and_then(|m| m.z_score).unwrap_or(0.0);
-                                            let b_z = benchmark.open_interest_bias_ratio.as_ref().and_then(|m| m.z_score).unwrap_or(0.0);
-                                            let spread = (p_z - b_z).abs();
-                                            results.push(json!({
-                                                "symbol": symbol,
-                                                "benchmark": benchmark_symbol,
-                                                "open_interest_bias_z_spread": spread,
-                                                "primary_z": p_z,
-                                                "benchmark_z": b_z,
-                                            }));
-                                        }
-                                    }
-                                }
-                            }
-                            results.sort_by(|a, b| {
-                                let a_val = a["open_interest_bias_z_spread"].as_f64().unwrap_or(0.0);
-                                let b_val = b["open_interest_bias_z_spread"].as_f64().unwrap_or(0.0);
-                                b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            results.truncate(limit);
-                        }
-                        Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&results).unwrap_or_default()}] }))
-                    }
-                    "get_portfolio" => {
-                        let _margin_ratio = get_f64_arg(args, "margin_ratio").ok().flatten().unwrap_or(0.3);
-                        let ledger = match Ledger::open_default() {
-                            Ok(l) => l,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error opening ledger: {}", e)}], "isError": true }))
-                        };
-                        let positions = match ledger.calculate_positions(None) {
-                            Ok(p) => p,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error calculating positions: {}", e)}], "isError": true }))
-                        };
-                        
-                        let account_snapshot = match ledger.latest_account_snapshot() {
-                            Ok(Some(a)) => a,
-                            _ => AccountSnapshot {
-                                id: 0,
-                                snapshot_at: "".to_string(),
-                                cash_balance: 100000.0,
-                                option_buying_power: None,
-                                margin_enabled: true,
-                                notes: "dummy snapshot".to_string()
-                            }
-                        };
-                        
-                        let account = AccountContext {
-                            cash_balance: Some(account_snapshot.cash_balance),
-                            option_buying_power: account_snapshot.option_buying_power,
-                            margin_enabled: account_snapshot.margin_enabled,
-                        };
-                        
-                        let analysis_service = match theta::analysis_service::ThetaAnalysisService::from_env().await {
-                            Ok(s) => s,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error loading analysis service: {}", e)}], "isError": true }))
-                        };
-                        
-                        let enriched = match portfolio_service::enrich_positions(&analysis_service, &positions).await {
-                            Ok(e) => e,
-                            Err(e) => return Ok(json!({ "content": [{"type": "text", "text": format!("Error enriching positions: {}", e)}], "isError": true }))
-                        };
-                        
-                        let strategies = risk_engine::identify_strategies(&positions);
-                        let evaluated_strategies = margin_engine::evaluate_strategies(&strategies, &enriched, &account);
-                        let portfolio_greeks = risk_engine::aggregate_greeks(&enriched);
-                        
-                        let total_margin: f64 = evaluated_strategies.iter().map(|s| s.margin.margin_required).sum();
-                        let unrealized_pnl: f64 = enriched.iter().map(|p| p.unrealized_pnl).sum();
-                        
-                        let report = serde_json::json!({
-                            "account": account_snapshot,
-                            "positions_count": enriched.len(),
-                            "unrealized_pnl": unrealized_pnl,
-                            "total_margin_required": total_margin,
-                            "portfolio_greeks": portfolio_greeks,
-                            "strategies": evaluated_strategies,
-                            "enriched_positions": enriched,
-                        });
-                        Ok(json!({ "content": [{"type": "text", "text": serde_json::to_string_pretty(&report).unwrap_or_default()}] }))
-                    }
-                    _ => Ok(json!({
-                        "error": format!("Unknown tool: {}", tool_name)
-                    })),
+        params: CallToolRequestParams,
+        _runtime: Arc<dyn McpServer>,
+    ) -> Result<CallToolResult, CallToolError> {
+        let s = &self.state;
+        match params.name.as_str() {
+            "get_stock_quote" => {
+                let args: GetStockQuoteArgs = self.parse_args(params.arguments)?;
+                
+                match s.service.stock_quote(&args.symbol).await {
+                    Ok(quote) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&quote).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
                 }
             }
-            _ => {
-                tracing::warn!("Method not handled by handler: {}", method);
-                Err(Error::protocol(
-                    mcp_sdk_rs::error::ErrorCode::MethodNotFound,
-                    "Method not implemented",
-                ))
+            "get_market_tone" => {
+                let args: GetMarketToneArgs = self.parse_args(params.arguments)?;
+                
+                let symbol = args.symbol.clone();
+                let expiries_limit = args.expiries_limit.unwrap_or(4) as usize;
+                
+                let expiry = if let Some(dt) = args.expiry {
+                    match theta::market_data::parse_expiry_date(&dt) {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                    }
+                } else {
+                    match s.service.front_expiry_for_symbol(&symbol).await {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                    }
+                };
+
+                let tone_req = MarketToneRequest {
+                    symbol: symbol.clone(),
+                    expiry,
+                    expiries_limit,
+                    rate: None,
+                    dividend: 0.0,
+                    iv: None,
+                    iv_from_market_price: true,
+                    target_delta: 0.25,
+                    target_otm_percent: 0.05,
+                    smile_target_otm_percents: vec![0.05, 0.10, 0.15],
+                    bias_min_otm_percent: 0.05,
+                };
+
+                match s.service.market_tone(tone_req).await {
+                    Ok(view) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&view).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
             }
+            "get_signal_history" => {
+                let args: GetSignalHistoryArgs = self.parse_args(params.arguments)?;
+                
+                let limit = args.limit.unwrap_or(20) as usize;
+                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
+                match store.list_market_tone_snapshots(args.symbol.as_deref(), limit) {
+                    Ok(snapshots) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&snapshots).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
+            }
+            "get_skew" => {
+                let args: GetSkewArgs = self.parse_args(params.arguments)?;
+                
+                let symbol = args.symbol.clone();
+                let expiry_date = if let Some(dt) = args.expiry {
+                    match theta::market_data::parse_expiry_date(&dt) {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                    }
+                } else {
+                    match s.service.front_expiry_for_symbol(&symbol).await {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                    }
+                };
+
+                let skew_req = SkewSignalRequest {
+                    symbol,
+                    expiry: expiry_date,
+                    rate: None,
+                    dividend: 0.0,
+                    iv: None,
+                    iv_from_market_price: true,
+                    target_delta: args.target_delta.unwrap_or(0.25),
+                    target_otm_percent: args.target_otm_percent.unwrap_or(0.05),
+                };
+
+                match s.service.skew(skew_req).await {
+                    Ok(skew) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&skew).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
+            }
+            "get_smile" => {
+                let args: GetSmileArgs = self.parse_args(params.arguments)?;
+                
+                let symbol = args.symbol.clone();
+                let expiry_date = if let Some(dt) = args.expiry {
+                    match theta::market_data::parse_expiry_date(&dt) {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                    }
+                } else {
+                    match s.service.front_expiry_for_symbol(&symbol).await {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                    }
+                };
+
+                let smile_req = SmileSignalRequest {
+                    symbol,
+                    expiry: expiry_date,
+                    rate: None,
+                    dividend: 0.0,
+                    iv: None,
+                    iv_from_market_price: true,
+                    target_otm_percents: vec![0.02, 0.05, 0.10, 0.15, 0.20],
+                };
+
+                match s.service.smile(smile_req).await {
+                    Ok(smile) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&smile).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
+            }
+            "get_term_structure" => {
+                let args: GetTermStructureArgs = self.parse_args(params.arguments)?;
+                
+                let ts_req = TermStructureRequest {
+                    symbol: args.symbol.clone(),
+                    expiries_limit: args.expiries_limit.unwrap_or(4) as usize,
+                    rate: None,
+                    dividend: 0.0,
+                    iv: None,
+                    iv_from_market_price: true,
+                };
+
+                match s.service.term_structure(ts_req).await {
+                    Ok(ts) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&ts).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
+            }
+            "get_put_call_bias" => {
+                let args: GetPutCallBiasArgs = self.parse_args(params.arguments)?;
+                
+                let symbol = args.symbol.clone();
+                let expiry_date = if let Some(dt) = args.expiry {
+                    match theta::market_data::parse_expiry_date(&dt) {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                    }
+                } else {
+                    match s.service.front_expiry_for_symbol(&symbol).await {
+                        Ok(exp) => exp,
+                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                    }
+                };
+
+                let bias_req = PutCallBiasRequest {
+                    symbol,
+                    expiry: expiry_date,
+                    rate: None,
+                    dividend: 0.0,
+                    iv: None,
+                    iv_from_market_price: true,
+                    min_otm_percent: args.bias_min_otm_percent.unwrap_or(0.05),
+                };
+
+                match s.service.put_call_bias(bias_req).await {
+                    Ok(bias) => Ok(CallToolResult::text_content(vec![
+                        serde_json::to_string_pretty(&bias).unwrap_or_default().into(),
+                    ])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                }
+            }
+            "get_market_extreme" => {
+                let args: GetMarketExtremeArgs = self.parse_args(params.arguments)?;
+                
+                let limit = args.limit.unwrap_or(20) as usize;
+                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
+                
+                let symbols = store.list_symbols().map_err(|e| CallToolError::from_message(e.to_string()))?;
+                let mut results = Vec::new();
+                for symbol in symbols {
+                    if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
+                        results.push(row);
+                    }
+                }
+
+                Ok(CallToolResult::text_content(vec![
+                    serde_json::to_string_pretty(&results).unwrap_or_default().into(),
+                ]))
+            }
+            "get_relative_extreme" => {
+                let args: GetRelativeExtremeArgs = self.parse_args(params.arguments)?;
+                
+                let limit = args.limit.unwrap_or(20) as usize;
+                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
+                
+                let symbols = store.list_symbols().map_err(|e| CallToolError::from_message(e.to_string()))?;
+                let mut results = Vec::new();
+                for symbol in symbols {
+                    if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
+                        if let Some(z) = row.front_atm_iv.z_score {
+                             if z.abs() >= 2.0 {
+                                 results.push(row);
+                             }
+                        }
+                    }
+                }
+
+                Ok(CallToolResult::text_content(vec![
+                    serde_json::to_string_pretty(&results).unwrap_or_default().into(),
+                ]))
+            }
+            "get_portfolio" => {
+                let _args: GetPortfolioArgs = self.parse_args(params.arguments)?;
+                
+                let ledger = Ledger::open(&s.db_path).map_err(|e| CallToolError::from_message(format!("Failed to open ledger: {}", e)))?; 
+                
+                let positions: Vec<Position> = match ledger.calculate_positions(None) {
+                    Ok(p) => p,
+                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error loading positions: {}", e).into()])),
+                };
+                
+                let account_snapshot = match ledger.latest_account_snapshot() {
+                    Ok(Some(a)) => a,
+                    _ => AccountSnapshot {
+                        id: 0,
+                        snapshot_at: "".to_string(),
+                        cash_balance: 100000.0,
+                        option_buying_power: None,
+                        margin_enabled: true,
+                        notes: "dummy snapshot".to_string()
+                    }
+                };
+                
+                let account = AccountContext {
+                    cash_balance: Some(account_snapshot.cash_balance),
+                    option_buying_power: account_snapshot.option_buying_power,
+                    margin_enabled: account_snapshot.margin_enabled,
+                };
+                
+                let analysis_service = match theta::analysis_service::ThetaAnalysisService::from_env().await {
+                    Ok(service) => service,
+                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error loading analysis service: {}", e).into()])),
+                };
+                
+                let enriched = match portfolio_service::enrich_positions(&analysis_service, &positions).await {
+                    Ok(e) => e,
+                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error enriching positions: {}", e).into()])),
+                };
+                
+                let strategies = risk_engine::identify_strategies(&positions);
+                let evaluated_strategies = margin_engine::evaluate_strategies(&strategies, &enriched, &account);
+                let portfolio_greeks = risk_engine::aggregate_greeks(&enriched);
+                
+                let total_margin: f64 = evaluated_strategies.iter().map(|s| s.margin.margin_required).sum();
+                let unrealized_pnl: f64 = enriched.iter().map(|p| p.unrealized_pnl).sum();
+                
+                let report = serde_json::json!({
+                    "account": account_snapshot,
+                    "positions_count": enriched.len(),
+                    "unrealized_pnl": unrealized_pnl,
+                    "total_margin_required": total_margin,
+                    "portfolio_greeks": portfolio_greeks,
+                    "strategies": evaluated_strategies,
+                    "enriched_positions": enriched,
+                });
+                
+                Ok(CallToolResult::text_content(vec![
+                    serde_json::to_string_pretty(&report).unwrap_or_default().into(),
+                ]))
+            }
+            _ => Err(CallToolError::unknown_tool(params.name)),
         }
     }
 }
+
+// --- Implementation Helpers ---
 
 fn default_db_path() -> Result<std::path::PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     Ok(std::path::PathBuf::from(home).join(".theta").join("signals.db"))
 }
 
-async fn write_mcp_message(msg: &str) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut stdout = tokio::io::stdout();
-    let bytes = msg.as_bytes();
-    stdout.write_all(bytes).await?;
-    stdout.write_all(b"\n").await?;
-    stdout.flush().await?;
-    Ok(())
-}
-
-async fn read_next_mcp_payload(
-    reader: &mut tokio::io::BufReader<tokio::io::Stdin>,
-    line: &mut String,
-) -> std::io::Result<Option<String>> {
-    use tokio::io::AsyncBufReadExt;
-
-    line.clear();
-    let n = reader.read_line(line).await?;
-    if n == 0 {
-        return Ok(None);
-    }
-
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(Some(String::new()));
-    }
-
-    Ok(Some(trimmed.to_string()))
-}
-
-fn transform_incoming_payload(payload: &str) -> (String, bool) {
-    let mut v: Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return (payload.to_string(), false),
-    };
-
-    let mut is_init = false;
-    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-        if method == "initialize" {
-            is_init = true;
-            if let Some(params) = v.get_mut("params").and_then(|p| p.as_object_mut()) {
-                // Compatibility for protocolVersion/protocol_version
-                if let Some(ver) = params.get("protocolVersion").or_else(|| params.get("protocol_version")).cloned() {
-                    params.insert("protocolVersion".to_string(), ver.clone());
-                    params.insert("protocol_version".to_string(), ver);
-                } else {
-                    params.insert("protocolVersion".to_string(), json!("2024-11-05"));
-                    params.insert("protocol_version".to_string(), json!("2024-11-05"));
-                }
-
-                // Compatibility for clientInfo/implementation
-                if let Some(info) = params.get("clientInfo").or_else(|| params.get("implementation")).cloned() {
-                    params.insert("clientInfo".to_string(), info.clone());
-                    params.insert("implementation".to_string(), info);
-                }
-            }
-        } else if method == "notifications/initialized" {
-            // Standard MCP notification name -> SDK 0.3.x expects "initialized"
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("method".to_string(), json!("initialized"));
-            }
-        }
-    }
-    let result = serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string());
-    (result, is_init)
-}
-
-fn transform_outgoing_payload(payload: &str) -> String {
-    let mut v: Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return payload.to_string(),
-    };
-
-    // If it's a result containing "tools" as an object (capability), it's the initialize response in this SDK
-    if let Some(result) = v.get_mut("result") {
-        if result.get("tools").map(|t| t.is_object()).unwrap_or(false) && result.get("protocolVersion").is_none() {
-            let capabilities = result.clone();
-            *result = json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": capabilities,
-                "serverInfo": {
-                    "name": "theta-server",
-                    "version": "0.1.0"
-                }
-            });
-            tracing::debug!("Transformed outgoing initialize response to be spec-compliant");
-        }
-    }
-
-    serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
-}
-
-
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> SdkResult<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    tracing::info!("Starting theta MCP server via mcp-sdk-rs");
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
+    tracing::info!("Starting theta MCP server via rust-mcp-sdk");
 
     tracing::info!("Initializing ThetaSignalService (with 30s timeout)...");
-    
-    // Check for credentials presence before starting
-    let has_key = std::env::var("LONGPORT_APP_KEY").is_ok();
-    let has_secret = std::env::var("LONGPORT_APP_SECRET").is_ok();
-    let has_token = std::env::var("LONGPORT_ACCESS_TOKEN").is_ok();
-    tracing::info!("Credentials present: KEY={}, SECRET={}, TOKEN={}", has_key, has_secret, has_token);
-
     let service_result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         ThetaSignalService::from_env()
     ).await;
 
     let service = match service_result {
-        Ok(Ok(s)) => s,
+        Ok(Ok(s)) => Arc::new(s),
         Ok(Err(e)) => {
             tracing::error!("Failed to initialize ThetaSignalService: {}", e);
-            return Err(e);
+            return Err(rust_mcp_sdk::error::McpSdkError::Internal { description: format!("Service init failed: {}", e) });
         }
         Err(_) => {
-            tracing::error!("Timeout (30s) reached while initializing ThetaSignalService. This likely indicates a network/DNS issue connecting to Longport APIs.");
-            anyhow::bail!("Service initialization timed out");
+            tracing::error!("Timeout (30s) reached while initializing ThetaSignalService.");
+            return Err(rust_mcp_sdk::error::McpSdkError::Internal { description: "Service initialization timed out".to_string() });
         }
     };
-    let db_path = default_db_path()?;
-    tracing::info!("Using database path: {:?}", db_path);
+
+    let db_path = default_db_path().map_err(|e| rust_mcp_sdk::error::McpSdkError::Internal { description: e.to_string() })?;
     let state = Arc::new(ThetaServerState { service, db_path });
 
-    let (tx, rx) = tokio::sync::mpsc::channel(100);
-    let (tx_out, mut rx_out) = tokio::sync::mpsc::channel::<String>(100);
+    let server_details = InitializeResult {
+        server_info: Implementation {
+            name: "theta-vps".into(),
+            version: "0.2.0".into(),
+            title: Some("Theta Market Analysis Server".into()),
+            description: Some("Exposes theta project tools as MCP endpoints".into()),
+            icons: vec![],
+            website_url: None,
+        },
+        capabilities: ServerCapabilities { 
+            tools: Some(ServerCapabilitiesTools { list_changed: None }), 
+            ..Default::default() 
+        },
+        protocol_version: ProtocolVersion::V2024_11_05.into(),
+        instructions: None,
+        meta: None
+    };
 
-    let transport = Arc::new(StdioTransport::new(rx, tx_out));
-    let server = Server::new(transport.clone(), state);
-
-    tokio::spawn(async move {
-        while let Some(msg) = rx_out.recv().await {
-            let msg = transform_outgoing_payload(&msg);
-            if let Err(e) = write_mcp_message(&msg).await {
-                tracing::error!("Failed to write MCP response: {}", e);
-                break;
-            }
-        }
+    let transport = StdioTransport::new(TransportOptions::default())
+        .map_err(|e| rust_mcp_sdk::error::McpSdkError::Internal { description: e.to_string() })?;
+    
+    let handler = ThetaHandler { state }.to_mcp_server_handler();
+    
+    let server = server_runtime::create_server(McpServerOptions {
+        transport,
+        handler,
+        server_details,
+        task_store: None,
+        client_task_store: None,
     });
 
-    tokio::spawn(async move {
-        let stdin = tokio::io::stdin();
-        let mut reader = tokio::io::BufReader::new(stdin);
-        let mut line = String::new();
-
-        loop {
-            match read_next_mcp_payload(&mut reader, &mut line).await {
-                Ok(Some(payload)) => {
-                    if payload.trim().is_empty() {
-                        continue;
-                    }
-                    let (transformed_payload, is_init) = transform_incoming_payload(&payload);
-                    if tx.send(transformed_payload).await.is_err() {
-                        break;
-                    }
-                    if is_init {
-                        tracing::info!("Initialize request received and forwarded to SDK");
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::warn!("Failed to read MCP request: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-
-    if let Err(e) = server.start().await {
-        tracing::error!("Server error: {}", e);
-    }
-
-    Ok(())
+    tracing::info!("Running MCP server on stdio...");
+    server.start().await
 }
