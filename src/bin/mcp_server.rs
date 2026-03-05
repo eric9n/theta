@@ -562,9 +562,8 @@ async fn write_mcp_message(msg: &str) -> std::io::Result<()> {
 
     let mut stdout = tokio::io::stdout();
     let bytes = msg.as_bytes();
-    let header = format!("Content-Length: {}\r\n\r\n", bytes.len());
-    stdout.write_all(header.as_bytes()).await?;
     stdout.write_all(bytes).await?;
+    stdout.write_all(b"\n").await?;
     stdout.flush().await?;
     Ok(())
 }
@@ -573,7 +572,7 @@ async fn read_next_mcp_payload(
     reader: &mut tokio::io::BufReader<tokio::io::Stdin>,
     line: &mut String,
 ) -> std::io::Result<Option<String>> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    use tokio::io::AsyncBufReadExt;
 
     line.clear();
     let n = reader.read_line(line).await?;
@@ -581,41 +580,12 @@ async fn read_next_mcp_payload(
         return Ok(None);
     }
 
-    let lower = line.to_ascii_lowercase();
-    if lower.starts_with("content-length:") {
-        let len_str = line
-            .split(':')
-            .nth(1)
-            .map(str::trim)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length header"))?;
-        let content_len = len_str
-            .parse::<usize>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid Content-Length: {e}")))?;
-
-        loop {
-            line.clear();
-            let m = reader.read_line(line).await?;
-            if m == 0 {
-                return Ok(None);
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-        }
-
-        let mut payload = vec![0_u8; content_len];
-        reader.read_exact(&mut payload).await?;
-        let json = String::from_utf8(payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        return Ok(Some(json));
-    }
-
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        Ok(Some(String::new()))
-    } else {
-        Ok(Some(trimmed.to_string()))
+        return Ok(Some(String::new()));
     }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 fn is_initialize_request(payload: &str) -> bool {
