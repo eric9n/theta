@@ -664,11 +664,28 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting theta MCP server via mcp-sdk-rs");
 
-    let service = match ThetaSignalService::from_env().await {
-        Ok(s) => s,
-        Err(e) => {
+    tracing::info!("Initializing ThetaSignalService (with 30s timeout)...");
+    
+    // Check for credentials presence before starting
+    let has_key = std::env::var("LONGPORT_APP_KEY").is_ok();
+    let has_secret = std::env::var("LONGPORT_APP_SECRET").is_ok();
+    let has_token = std::env::var("LONGPORT_ACCESS_TOKEN").is_ok();
+    tracing::info!("Credentials present: KEY={}, SECRET={}, TOKEN={}", has_key, has_secret, has_token);
+
+    let service_result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ThetaSignalService::from_env()
+    ).await;
+
+    let service = match service_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             tracing::error!("Failed to initialize ThetaSignalService: {}", e);
             return Err(e);
+        }
+        Err(_) => {
+            tracing::error!("Timeout (30s) reached while initializing ThetaSignalService. This likely indicates a network/DNS issue connecting to Longport APIs.");
+            anyhow::bail!("Service initialization timed out");
         }
     };
     let db_path = default_db_path()?;
