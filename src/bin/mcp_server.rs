@@ -430,7 +430,8 @@ impl ServerHandler for ThetaHandler {
                     _ => AccountSnapshot {
                         id: 0,
                         snapshot_at: "".to_string(),
-                        cash_balance: 100000.0,
+                        trade_date_cash: 100000.0,
+                        settled_cash: 100000.0,
                         option_buying_power: None,
                         margin_enabled: true,
                         notes: "dummy snapshot".to_string()
@@ -438,7 +439,8 @@ impl ServerHandler for ThetaHandler {
                 };
                 
                 let account = AccountContext {
-                    cash_balance: Some(account_snapshot.cash_balance),
+                    trade_date_cash: Some(account_snapshot.trade_date_cash),
+                    settled_cash: Some(account_snapshot.settled_cash),
                     option_buying_power: account_snapshot.option_buying_power,
                     margin_enabled: account_snapshot.margin_enabled,
                 };
