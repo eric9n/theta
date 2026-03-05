@@ -3,9 +3,10 @@ use clap::ValueEnum;
 use serde::Serialize;
 use std::f64::consts::{PI, SQRT_2};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ContractSide {
+    #[default]
     Call,
     Put,
 }
@@ -21,7 +22,7 @@ pub struct PricingInput {
     pub option_type: ContractSide,
 }
 
-#[derive(Copy, Clone, Debug, Serialize)]
+#[derive(Copy, Clone, Debug, Serialize, Default)]
 pub struct OptionMetrics {
     pub option_type: ContractSide,
     pub fair_value: f64,

@@ -6,3 +6,4 @@
 .env.*
 capture-signals.env
 *.local
+.gemini

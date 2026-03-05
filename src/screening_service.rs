@@ -10,6 +10,7 @@ pub enum ChainSortField {
     Strike,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct ChainScreeningRequest {
     pub side: Option<ContractSide>,
     pub min_strike: Option<f64>,

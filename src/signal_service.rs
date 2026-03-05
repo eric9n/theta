@@ -94,32 +94,18 @@ impl ThetaSignalService {
             .analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
-                    symbol: req.symbol,
+                    symbol: req.symbol.clone(),
                     rate: req.rate,
                     dividend: req.dividend,
                     iv: req.iv,
                     iv_from_market_price: req.iv_from_market_price,
                     screening: ChainScreeningRequest {
-                        side: None,
-                        min_strike: None,
-                        max_strike: None,
-                        min_delta: None,
-                        max_delta: None,
-                        min_theta: None,
-                        max_theta: None,
-                        min_vega: None,
-                        max_vega: None,
-                        min_iv: None,
-                        max_iv: None,
-                        min_option_price: None,
-                        max_option_price: None,
-                        min_otm_percent: None,
-                        max_otm_percent: None,
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        sort_by: None,
-                        limit: None,
+                        min_otm_percent: Some(-0.08),
+                        max_otm_percent: Some(0.08),
+                        ..Default::default()
                     },
                 },
             )
@@ -132,12 +118,13 @@ impl ThetaSignalService {
         validate_term_structure_request(&req)?;
         self.build_term_structure_from_front(
             req.symbol,
-            time::Date::MIN,
+            time::Date::MIN, // Use MIN to fetch from the very first available expiry
             req.expiries_limit,
             req.rate,
             req.dividend,
             req.iv,
             req.iv_from_market_price,
+            None,
         )
         .await
     }
@@ -150,32 +137,18 @@ impl ThetaSignalService {
             .analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
-                    symbol: req.symbol,
+                    symbol: req.symbol.clone(),
                     rate: req.rate,
                     dividend: req.dividend,
                     iv: req.iv,
                     iv_from_market_price: req.iv_from_market_price,
                     screening: ChainScreeningRequest {
-                        side: None,
-                        min_strike: None,
-                        max_strike: None,
-                        min_delta: None,
-                        max_delta: None,
-                        min_theta: None,
-                        max_theta: None,
-                        min_vega: None,
-                        max_vega: None,
-                        min_iv: None,
-                        max_iv: None,
-                        min_option_price: None,
-                        max_option_price: None,
-                        min_otm_percent: None,
-                        max_otm_percent: None,
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        sort_by: None,
-                        limit: None,
+                        min_otm_percent: Some(-0.15),
+                        max_otm_percent: Some(0.15),
+                        ..Default::default()
                     },
                 },
             )
@@ -192,32 +165,18 @@ impl ThetaSignalService {
             .analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
-                    symbol: req.symbol,
+                    symbol: req.symbol.clone(),
                     rate: req.rate,
                     dividend: req.dividend,
                     iv: req.iv,
                     iv_from_market_price: req.iv_from_market_price,
                     screening: ChainScreeningRequest {
-                        side: None,
-                        min_strike: None,
-                        max_strike: None,
-                        min_delta: None,
-                        max_delta: None,
-                        min_theta: None,
-                        max_theta: None,
-                        min_vega: None,
-                        max_vega: None,
-                        min_iv: None,
-                        max_iv: None,
-                        min_option_price: None,
-                        max_option_price: None,
-                        min_otm_percent: None,
-                        max_otm_percent: None,
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        sort_by: None,
-                        limit: None,
+                        min_otm_percent: Some(-0.15),
+                        max_otm_percent: Some(0.15),
+                        ..Default::default()
                     },
                 },
             )
@@ -264,40 +223,39 @@ impl ThetaSignalService {
             min_otm_percent: req.bias_min_otm_percent,
         })?;
 
-        let skew = self
-            .skew(SkewSignalRequest {
-                symbol: req.symbol.clone(),
-                expiry: req.expiry,
-                rate: req.rate,
-                dividend: req.dividend,
-                iv: req.iv,
-                iv_from_market_price: req.iv_from_market_price,
-                target_delta: req.target_delta,
-                target_otm_percent: req.target_otm_percent,
-            })
+        // CRITICAL OPTIMIZATION: Fetch the chain analysis for front expiry ONCE
+        let front_analysis = self
+            .analysis
+            .analyze_chain(
+                req.expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        min_otm_percent: Some(-0.15),
+                        max_otm_percent: Some(0.15),
+                        ..Default::default()
+                    },
+                },
+            )
             .await?;
-        let smile = self
-            .smile(SmileSignalRequest {
-                symbol: req.symbol.clone(),
-                expiry: req.expiry,
-                rate: req.rate,
-                dividend: req.dividend,
-                iv: req.iv,
-                iv_from_market_price: req.iv_from_market_price,
-                target_otm_percents: req.smile_target_otm_percents,
-            })
-            .await?;
-        let put_call_bias = self
-            .put_call_bias(PutCallBiasRequest {
-                symbol: req.symbol.clone(),
-                expiry: req.expiry,
-                rate: req.rate,
-                dividend: req.dividend,
-                iv: req.iv,
-                iv_from_market_price: req.iv_from_market_price,
-                min_otm_percent: req.bias_min_otm_percent,
-            })
-            .await?;
+
+        // Reuse pre-computed analysis for all summary components
+        let skew = build_skew_signal_view(
+            front_analysis.clone(),
+            req.target_delta,
+            req.target_otm_percent,
+        )?;
+        let smile = build_smile_signal_view(front_analysis.clone(), &req.smile_target_otm_percents)?;
+        let put_call_bias = build_put_call_bias_view(front_analysis.clone(), req.bias_min_otm_percent)?;
+
+        // Throttling implemented inside build_term_structure_from_front
         let term_structure = self
             .build_term_structure_from_front(
                 req.symbol.clone(),
@@ -307,6 +265,7 @@ impl ThetaSignalService {
                 req.dividend,
                 req.iv,
                 req.iv_from_market_price,
+                Some(front_analysis),
             )
             .await?;
 
@@ -332,6 +291,7 @@ impl ThetaSignalService {
         dividend: f64,
         iv: Option<f64>,
         iv_from_market_price: bool,
+        prefetched_front: Option<crate::domain::ChainAnalysisView>,
     ) -> Result<TermStructureView> {
         let expiry_strings = self.analysis.market().fetch_option_expiries(&symbol).await?;
         let expiries: Vec<time::Date> = expiry_strings
@@ -345,42 +305,37 @@ impl ThetaSignalService {
 
         let mut points = Vec::with_capacity(expiries.len());
 
-        for expiry in expiries {
-            let analysis = self
-                .analysis
-                .analyze_chain(
-                    expiry,
-                    AnalyzeChainRequest {
-                        symbol: symbol.clone(),
-                        rate,
-                        dividend,
-                        iv,
-                        iv_from_market_price,
-                        screening: ChainScreeningRequest {
-                            side: None,
-                            min_strike: None,
-                            max_strike: None,
-                            min_delta: None,
-                            max_delta: None,
-                            min_theta: None,
-                            max_theta: None,
-                            min_vega: None,
-                            max_vega: None,
-                            min_iv: None,
-                            max_iv: None,
-                            min_option_price: None,
-                            max_option_price: None,
-                            min_otm_percent: None,
-                            max_otm_percent: None,
-                            only_liquid: true,
-                            exclude_abnormal: true,
-                            exclude_near_expiry: true,
-                            sort_by: None,
-                            limit: None,
+        for (i, expiry) in expiries.into_iter().enumerate() {
+            // Reuse prefetched front analysis if applicable
+            let analysis = if i == 0 && let Some(view) = prefetched_front.clone() && view.expiry == expiry.to_string() {
+                view
+            } else {
+                // Throttling: introduce a small gap to avoid concurrent API rate limit 301607/max concurrent
+                if i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                }
+
+                self.analysis
+                    .analyze_chain(
+                        expiry,
+                        AnalyzeChainRequest {
+                            symbol: symbol.clone(),
+                            rate,
+                            dividend,
+                            iv,
+                            iv_from_market_price,
+                            screening: ChainScreeningRequest {
+                                only_liquid: true,
+                                exclude_abnormal: true,
+                                exclude_near_expiry: true,
+                                min_otm_percent: Some(-0.08),
+                                max_otm_percent: Some(0.08),
+                                ..Default::default()
+                            },
                         },
-                    },
-                )
-                .await?;
+                    )
+                    .await?
+            };
 
             points.push(build_term_structure_point(&analysis)?);
         }

@@ -11,7 +11,7 @@ struct Cli {
     symbol: String,
     #[arg(long, help = "Front expiry date in YYYY-MM-DD")]
     expiry: String,
-    #[arg(long, default_value_t = 4, help = "Number of upcoming expiries to include in term structure")]
+    #[arg(long, default_value_t = 1, help = "Number of upcoming expiries to include in term structure")]
     expiries_limit: usize,
     #[arg(long, help = "Annualized risk-free rate; if omitted, uses default tenor-based mapping")]
     rate: Option<f64>,

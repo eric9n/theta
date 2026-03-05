@@ -142,7 +142,7 @@ pub struct OptionAnalysisView {
     pub iv_comparison: Option<IvComparison>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChainAnalysisRow {
     pub option_symbol: String,
     pub option_type: ContractSide,
@@ -157,7 +157,7 @@ pub struct ChainAnalysisRow {
     pub local_greeks: OptionMetrics,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChainAnalysisView {
     pub underlying_symbol: String,
     pub underlying_price: String,
