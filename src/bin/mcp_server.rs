@@ -554,7 +554,7 @@ async fn main() -> SdkResult<()> {
             tools: Some(ServerCapabilitiesTools { list_changed: None }), 
             ..Default::default() 
         },
-        protocol_version: ProtocolVersion::V2024_11_05.into(),
+        protocol_version: ProtocolVersion::V2025_06_18.into(),
         instructions: None,
         meta: None
     };
