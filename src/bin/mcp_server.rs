@@ -588,7 +588,7 @@ async fn read_next_mcp_payload(
     Ok(Some(trimmed.to_string()))
 }
 
-fn transform_initialize_payload(payload: &str) -> String {
+fn transform_incoming_payload(payload: &str) -> String {
     let mut v: Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(_) => return payload.to_string(),
@@ -618,9 +618,34 @@ fn transform_initialize_payload(payload: &str) -> String {
     }
     let result = serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string());
     if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
-        tracing::debug!("Final initialize payload: {}", result);
+        tracing::debug!("Final incoming initialize payload: {}", result);
     }
     result
+}
+
+fn transform_outgoing_payload(payload: &str) -> String {
+    let mut v: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return payload.to_string(),
+    };
+
+    // If it's a result containing "tools", it's almost certainly the initialize response in this SDK
+    if let Some(result) = v.get_mut("result") {
+        if result.get("tools").is_some() && result.get("protocolVersion").is_none() {
+            let capabilities = result.clone();
+            *result = json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": capabilities,
+                "serverInfo": {
+                    "name": "theta-server",
+                    "version": "0.1.0"
+                }
+            });
+            tracing::debug!("Transformed outgoing initialize response to be spec-compliant");
+        }
+    }
+
+    serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
 }
 
 
@@ -645,6 +670,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         while let Some(msg) = rx_out.recv().await {
+            let msg = transform_outgoing_payload(&msg);
             if let Err(e) = write_mcp_message(&msg).await {
                 tracing::error!("Failed to write MCP response: {}", e);
                 break;
@@ -663,7 +689,7 @@ async fn main() -> Result<()> {
                     if payload.trim().is_empty() {
                         continue;
                     }
-                    let transformed_payload = transform_initialize_payload(&payload);
+                    let transformed_payload = transform_incoming_payload(&payload);
                     tracing::debug!("Incoming MCP payload (raw): {}", payload);
                     if transformed_payload != payload {
                         tracing::debug!("Transformed payload: {}", transformed_payload);
