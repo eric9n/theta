@@ -631,9 +631,9 @@ fn transform_outgoing_payload(payload: &str) -> String {
         Err(_) => return payload.to_string(),
     };
 
-    // If it's a result containing "tools", it's almost certainly the initialize response in this SDK
+    // If it's a result containing "tools" as an object (capability), it's the initialize response in this SDK
     if let Some(result) = v.get_mut("result") {
-        if result.get("tools").is_some() && result.get("protocolVersion").is_none() {
+        if result.get("tools").map(|t| t.is_object()).unwrap_or(false) && result.get("protocolVersion").is_none() {
             let capabilities = result.clone();
             *result = json!({
                 "protocolVersion": "2024-11-05",
