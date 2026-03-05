@@ -57,185 +57,153 @@ impl ServerHandler for ThetaServerState {
     ) -> Result<serde_json::Value, Error> {
         match method {
             "tools/list" => {
-                let get_market_tone_tool = Tool {
-                    name: "get_market_tone".to_string(),
-                    description: "Get the current market tone summary and options structure for a given symbol".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": {
-                                    "type": "string",
-                                    "description": "Stock symbol (e.g. TSLA.US)"
-                                },
-                                "expiry": {
-                                    "type": "string",
-                                    "description": "Optional explicit expiry date (e.g. 2026-06-18)"
-                                },
-                                "expiries_limit": {
-                                    "type": "number",
-                                    "description": "Number of expiries for term structure (default 4)",
-                                    "default": 4
-                                }
+                let get_market_tone_tool = json!({
+                    "name": "get_market_tone",
+                    "description": "Get the current market tone summary and options structure for a given symbol",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "Stock symbol (e.g. TSLA.US)"
+                            },
+                            "expiry": {
+                                "type": "string",
+                                "description": "Optional explicit expiry date (e.g. 2026-06-18)"
+                            },
+                            "expiries_limit": {
+                                "type": "number",
+                                "description": "Number of expiries for term structure (default 4)",
+                                "default": 4
                             }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                        },
+                        "required": ["symbol"]
+                    }
+                });
 
-                let get_signal_history_tool = Tool {
-                    name: "get_signal_history".to_string(),
-                    description: "Get historically captured market tone snapshots from the local database".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": {
-                                    "type": "string",
-                                    "description": "Optional stock symbol to filter by (e.g. TSLA.US)"
-                                },
-                                "limit": {
-                                    "type": "number",
-                                    "description": "Maximum number of records to return (default 20)",
-                                    "default": 20
-                                }
+                let get_signal_history_tool = json!({
+                    "name": "get_signal_history",
+                    "description": "Get historically captured market tone snapshots from the local database",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "Optional stock symbol to filter by (e.g. TSLA.US)"
+                            },
+                            "limit": {
+                                "type": "number",
+                                "description": "Maximum number of records to return (default 20)",
+                                "default": 20
                             }
-                        })),
-                        required: None,
-                    }),
-                    annotations: None,
-                };
+                        }
+                    }
+                });
 
-                let get_skew_tool = Tool {
-                    name: "get_skew".to_string(),
-                    description: "Get volatility skew analysis for a given symbol".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                                "expiry": { "type": "string", "description": "Optional explicit expiry date (e.g. 2026-06-18)" },
-                                "target_delta": { "type": "number", "description": "Target absolute delta", "default": 0.25 },
-                                "target_otm_percent": { "type": "number", "description": "Target OTM percent", "default": 0.05 }
-                            }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                let get_skew_tool = json!({
+                    "name": "get_skew",
+                    "description": "Get volatility skew analysis for a given symbol",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                            "expiry": { "type": "string", "description": "Optional explicit expiry date (e.g. 2026-06-18)" },
+                            "target_delta": { "type": "number", "description": "Target absolute delta", "default": 0.25 },
+                            "target_otm_percent": { "type": "number", "description": "Target OTM percent", "default": 0.05 }
+                        },
+                        "required": ["symbol"]
+                    }
+                });
 
-                let get_smile_tool = Tool {
-                    name: "get_smile".to_string(),
-                    description: "Get volatility smile analysis for a given symbol".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                                "expiry": { "type": "string", "description": "Optional explicit expiry date" }
-                            }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                let get_smile_tool = json!({
+                    "name": "get_smile",
+                    "description": "Get volatility smile analysis for a given symbol",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                            "expiry": { "type": "string", "description": "Optional explicit expiry date" }
+                        },
+                        "required": ["symbol"]
+                    }
+                });
 
-                let get_term_structure_tool = Tool {
-                    name: "get_term_structure".to_string(),
-                    description: "Get ATM volatility term structure across expiries".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                                "expiries_limit": { "type": "number", "description": "Number of listed expiries to fetch", "default": 4 }
-                            }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                let get_term_structure_tool = json!({
+                    "name": "get_term_structure",
+                    "description": "Get ATM volatility term structure across expiries",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                            "expiries_limit": { "type": "number", "description": "Number of listed expiries to fetch", "default": 4 }
+                        },
+                        "required": ["symbol"]
+                    }
+                });
 
-                let get_put_call_bias_tool = Tool {
-                    name: "get_put_call_bias".to_string(),
-                    description: "Get volume and open interest bias between puts and calls".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
-                                "expiry": { "type": "string", "description": "Optional explicit expiry date" },
-                                "bias_min_otm_percent": { "type": "number", "description": "Minimum OTM percent for inclusion", "default": 0.05 }
-                            }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                let get_put_call_bias_tool = json!({
+                    "name": "get_put_call_bias",
+                    "description": "Get volume and open interest bias between puts and calls",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": { "type": "string", "description": "Stock symbol (e.g. TSLA.US)" },
+                            "expiry": { "type": "string", "description": "Optional explicit expiry date" },
+                            "bias_min_otm_percent": { "type": "number", "description": "Minimum OTM percent for inclusion", "default": 0.05 }
+                        },
+                        "required": ["symbol"]
+                    }
+                });
 
-                let get_market_extreme_tool = Tool {
-                    name: "get_market_extreme".to_string(),
-                    description: "Screen for symbols hitting generalized market extremes today".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "limit": { "type": "number", "description": "Max results to return", "default": 20 }
-                            }
-                        })),
-                        required: None,
-                    }),
-                    annotations: None,
-                };
+                let get_market_extreme_tool = json!({
+                    "name": "get_market_extreme",
+                    "description": "Screen for symbols hitting generalized market extremes today",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                        }
+                    }
+                });
 
-                let get_relative_extreme_tool = Tool {
-                    name: "get_relative_extreme".to_string(),
-                    description: "Find symbols moving abnormally relative to their own history".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "limit": { "type": "number", "description": "Max results to return", "default": 20 }
-                            }
-                        })),
-                        required: None,
-                    }),
-                    annotations: None,
-                };
+                let get_relative_extreme_tool = json!({
+                    "name": "get_relative_extreme",
+                    "description": "Find symbols moving abnormally relative to their own history",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "number", "description": "Max results to return", "default": 20 }
+                        }
+                    }
+                });
 
-                let get_portfolio_tool = Tool {
-                    name: "get_portfolio".to_string(),
-                    description: "Get real-time portfolio holdings, P&L, and aggregated Greeks risk".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "margin_ratio": { "type": "number", "description": "Initial margin ratio assumption", "default": 0.3 }
-                            }
-                        })),
-                        required: None,
-                    }),
-                    annotations: None,
-                };
+                let get_portfolio_tool = json!({
+                    "name": "get_portfolio",
+                    "description": "Get real-time portfolio holdings, P&L, and aggregated Greeks risk",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "margin_ratio": { "type": "number", "description": "Initial margin ratio assumption", "default": 0.3 }
+                        }
+                    }
+                });
 
-                let get_stock_quote_tool = Tool {
-                    name: "get_stock_quote".to_string(),
-                    description: "Get real-time stock quote for a given symbol".to_string(),
-                    input_schema: Some(ToolSchema {
-                        properties: Some(json!({
-                            "type": "object",
-                            "properties": {
-                                "symbol": {
-                                    "type": "string",
-                                    "description": "Stock symbol (e.g. TSLA.US)"
-                                }
+                let get_stock_quote_tool = json!({
+                    "name": "get_stock_quote",
+                    "description": "Get real-time stock quote for a given symbol",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "Stock symbol (e.g. TSLA.US)"
                             }
-                        })),
-                        required: Some(vec!["symbol".to_string()]),
-                    }),
-                    annotations: None,
-                };
+                        },
+                        "required": ["symbol"]
+                    }
+                });
+
+
 
                 Ok(json!({
                     "tools": [
