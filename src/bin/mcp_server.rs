@@ -596,15 +596,31 @@ fn transform_initialize_payload(payload: &str) -> String {
 
     if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
         if let Some(params) = v.get_mut("params") {
-            if let Some(client_info) = params.get("clientInfo").cloned() {
-                if params.get("implementation").is_none() {
-                    params.as_object_mut()
-                        .map(|o| o.insert("implementation".to_string(), client_info));
+            let params_obj = params.as_object_mut();
+            if let Some(o) = params_obj {
+                // Compatibility for protocolVersion/protocol_version
+                if let Some(ver) = o.get("protocolVersion").or_else(|| o.get("protocol_version")).cloned() {
+                    o.insert("protocolVersion".to_string(), ver.clone());
+                    o.insert("protocol_version".to_string(), ver);
+                } else {
+                    // Default to standard version if missing
+                    o.insert("protocolVersion".to_string(), json!("2024-11-05"));
+                    o.insert("protocol_version".to_string(), json!("2024-11-05"));
+                }
+
+                // Compatibility for clientInfo/implementation
+                if let Some(info) = o.get("clientInfo").or_else(|| o.get("implementation")).cloned() {
+                    o.insert("clientInfo".to_string(), info.clone());
+                    o.insert("implementation".to_string(), info);
                 }
             }
         }
     }
-    serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
+    let result = serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string());
+    if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+        tracing::debug!("Final initialize payload: {}", result);
+    }
+    result
 }
 
 fn is_initialize_request(payload: &str) -> bool {
@@ -653,18 +669,13 @@ async fn main() -> Result<()> {
                     if payload.trim().is_empty() {
                         continue;
                     }
-                    let payload = transform_initialize_payload(&payload);
-                    let is_init = is_initialize_request(&payload);
-                    if tx.send(payload).await.is_err() {
-                        break;
+                    let transformed_payload = transform_initialize_payload(&payload);
+                    tracing::debug!("Incoming MCP payload (raw): {}", payload);
+                    if transformed_payload != payload {
+                        tracing::debug!("Transformed payload: {}", transformed_payload);
                     }
-                    // Compatibility: some clients skip the MCP `initialized` notification.
-                    // mcp-sdk-rs gates all methods on that flag, so we synthesize it once.
-                    if is_init {
-                        let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
-                        if tx.send(initialized.to_string()).await.is_err() {
-                            break;
-                        }
+                    if tx.send(transformed_payload).await.is_err() {
+                        break;
                     }
                 }
                 Ok(None) => break,
