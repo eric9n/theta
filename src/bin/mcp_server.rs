@@ -623,12 +623,6 @@ fn transform_initialize_payload(payload: &str) -> String {
     result
 }
 
-fn is_initialize_request(payload: &str) -> bool {
-    serde_json::from_str::<Value>(payload)
-        .ok()
-        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
-        .is_some_and(|m| m == "initialize")
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
