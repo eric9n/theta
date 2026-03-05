@@ -22,6 +22,7 @@ pub struct AnalyzeOptionRequest {
     pub use_provider_greeks: bool,
 }
 
+#[derive(Clone)]
 pub struct AnalyzeChainRequest {
     pub symbol: String,
     pub rate: Option<f64>,

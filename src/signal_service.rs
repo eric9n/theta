@@ -90,8 +90,7 @@ impl ThetaSignalService {
         validate_skew_request(&req)?;
 
         let analysis = self
-            .analysis
-            .analyze_chain(
+            .adaptive_analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
                     symbol: req.symbol.clone(),
@@ -103,8 +102,8 @@ impl ThetaSignalService {
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        min_otm_percent: Some(-0.08),
-                        max_otm_percent: Some(0.08),
+                        min_otm_percent: Some(-0.20),
+                        max_otm_percent: Some(0.20),
                         ..Default::default()
                     },
                 },
@@ -133,8 +132,7 @@ impl ThetaSignalService {
         validate_smile_request(&req)?;
 
         let analysis = self
-            .analysis
-            .analyze_chain(
+            .adaptive_analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
                     symbol: req.symbol.clone(),
@@ -146,8 +144,8 @@ impl ThetaSignalService {
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        min_otm_percent: Some(-0.15),
-                        max_otm_percent: Some(0.15),
+                        min_otm_percent: Some(-0.20),
+                        max_otm_percent: Some(0.20),
                         ..Default::default()
                     },
                 },
@@ -161,8 +159,7 @@ impl ThetaSignalService {
         validate_put_call_bias_request(&req)?;
 
         let analysis = self
-            .analysis
-            .analyze_chain(
+            .adaptive_analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
                     symbol: req.symbol.clone(),
@@ -174,8 +171,8 @@ impl ThetaSignalService {
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        min_otm_percent: Some(-0.15),
-                        max_otm_percent: Some(0.15),
+                        min_otm_percent: Some(-0.20),
+                        max_otm_percent: Some(0.20),
                         ..Default::default()
                     },
                 },
@@ -225,8 +222,7 @@ impl ThetaSignalService {
 
         // CRITICAL OPTIMIZATION: Fetch the chain analysis for front expiry ONCE
         let front_analysis = self
-            .analysis
-            .analyze_chain(
+            .adaptive_analyze_chain(
                 req.expiry,
                 AnalyzeChainRequest {
                     symbol: req.symbol.clone(),
@@ -238,8 +234,8 @@ impl ThetaSignalService {
                         only_liquid: true,
                         exclude_abnormal: true,
                         exclude_near_expiry: true,
-                        min_otm_percent: Some(-0.15),
-                        max_otm_percent: Some(0.15),
+                        min_otm_percent: Some(-0.20),
+                        max_otm_percent: Some(0.20),
                         ..Default::default()
                     },
                 },
@@ -315,8 +311,7 @@ impl ThetaSignalService {
                     tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
                 }
 
-                self.analysis
-                    .analyze_chain(
+                self.adaptive_analyze_chain(
                         expiry,
                         AnalyzeChainRequest {
                             symbol: symbol.clone(),
@@ -328,8 +323,8 @@ impl ThetaSignalService {
                                 only_liquid: true,
                                 exclude_abnormal: true,
                                 exclude_near_expiry: true,
-                                min_otm_percent: Some(-0.08),
-                                max_otm_percent: Some(0.08),
+                                min_otm_percent: Some(-0.15), // Term structure can be +/- 15%
+                                max_otm_percent: Some(0.15),
                                 ..Default::default()
                             },
                         },
@@ -347,6 +342,36 @@ impl ThetaSignalService {
             target_expiries: expiries_limit,
             points,
         })
+    }
+ 
+    async fn adaptive_analyze_chain(
+        &self,
+        expiry: time::Date,
+        mut req: AnalyzeChainRequest,
+    ) -> Result<crate::domain::ChainAnalysisView> {
+        let mut otm_range = req.screening.max_otm_percent.unwrap_or(0.20);
+        let min_range = 0.05;
+
+        loop {
+            req.screening.min_otm_percent = Some(-otm_range);
+            req.screening.max_otm_percent = Some(otm_range);
+
+            match self.analysis.analyze_chain(expiry, req.clone()).await {
+                Ok(view) => return Ok(view),
+                Err(e) if e.to_string().contains("301607") && otm_range > min_range => {
+                    tracing::warn!(
+                        "Hit 301607 error for {} @ {} with range +/- {:.2}%. Narrowing range and retrying...",
+                        req.symbol, expiry, otm_range * 100.0
+                    );
+                    otm_range *= 0.6; // Narrow range by 40%
+                    if otm_range < min_range {
+                        otm_range = min_range;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
