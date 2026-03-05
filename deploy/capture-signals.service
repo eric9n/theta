@@ -6,11 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=%i
-WorkingDirectory=/home/%i/theta
-Environment=HOME=/home/%i
+WorkingDirectory=%h/theta
+Environment=HOME=%h
 Environment=RUST_LOG=info
-EnvironmentFile=-/home/%i/.config/theta/capture-signals.env
-ExecStart=/home/%i/theta/target/release/capture-signals --loop --every-seconds 300 --market-hours-only
+EnvironmentFile=-%h/.config/theta/capture-signals.env
+ExecStart=%h/theta/target/release/capture-signals --loop --every-seconds 300 --market-hours-only
 Restart=always
 RestartSec=10
 
