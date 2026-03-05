@@ -602,32 +602,30 @@ fn transform_incoming_payload(payload: &str) -> (String, bool) {
     };
 
     let mut is_init = false;
-    if let Some(method) = v.get_mut("method").and_then(|m| m.as_str_mut()) {
+    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
         if method == "initialize" {
             is_init = true;
-            if let Some(params) = v.get_mut("params") {
-                let params_obj = params.as_object_mut();
-                if let Some(o) = params_obj {
-                    // Compatibility for protocolVersion/protocol_version
-                    if let Some(ver) = o.get("protocolVersion").or_else(|| o.get("protocol_version")).cloned() {
-                        o.insert("protocolVersion".to_string(), ver.clone());
-                        o.insert("protocol_version".to_string(), ver);
-                    } else {
-                        // Default to standard version if missing
-                        o.insert("protocolVersion".to_string(), json!("2024-11-05"));
-                        o.insert("protocol_version".to_string(), json!("2024-11-05"));
-                    }
+            if let Some(params) = v.get_mut("params").and_then(|p| p.as_object_mut()) {
+                // Compatibility for protocolVersion/protocol_version
+                if let Some(ver) = params.get("protocolVersion").or_else(|| params.get("protocol_version")).cloned() {
+                    params.insert("protocolVersion".to_string(), ver.clone());
+                    params.insert("protocol_version".to_string(), ver);
+                } else {
+                    params.insert("protocolVersion".to_string(), json!("2024-11-05"));
+                    params.insert("protocol_version".to_string(), json!("2024-11-05"));
+                }
 
-                    // Compatibility for clientInfo/implementation
-                    if let Some(info) = o.get("clientInfo").or_else(|| o.get("implementation")).cloned() {
-                        o.insert("clientInfo".to_string(), info.clone());
-                        o.insert("implementation".to_string(), info);
-                    }
+                // Compatibility for clientInfo/implementation
+                if let Some(info) = params.get("clientInfo").or_else(|| params.get("implementation")).cloned() {
+                    params.insert("clientInfo".to_string(), info.clone());
+                    params.insert("implementation".to_string(), info);
                 }
             }
         } else if method == "notifications/initialized" {
-            // Standard MCP name -> SDK expects "initialized"
-            *method = "initialized".to_string();
+            // Standard MCP notification name -> SDK 0.3.x expects "initialized"
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("method".to_string(), json!("initialized"));
+            }
         }
     }
     let result = serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string());
