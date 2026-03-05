@@ -53,6 +53,10 @@ impl ServerHandler for ThetaServerState {
                                 "type": "string",
                                 "description": "Stock symbol (e.g. TSLA.US)"
                             },
+                            "expiry": {
+                                "type": "string",
+                                "description": "Optional explicit expiry date (e.g. 2026-06-18)"
+                            },
                             "expiries_limit": {
                                 "type": "number",
                                 "description": "Number of expiries for term structure (default 4)",
@@ -106,12 +110,26 @@ impl ServerHandler for ThetaServerState {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(4) as usize;
 
-                        let expiry = match self.service.front_expiry_for_symbol(&symbol).await {
-                            Ok(exp) => exp,
-                            Err(e) => return Ok(json!({
-                                "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                                "isError": true
-                            })),
+                        let explicit_expiry = args
+                            .and_then(|a| a.get("expiry"))
+                            .and_then(|v| v.as_str());
+
+                        let expiry = if let Some(dt) = explicit_expiry {
+                            match theta::market_data::parse_expiry_date(dt) {
+                                Ok(exp) => exp,
+                                Err(e) => return Ok(json!({
+                                    "content": [{"type": "text", "text": format!("Error parsing expiry: {}", e)}],
+                                    "isError": true
+                                })),
+                            }
+                        } else {
+                            match self.service.front_expiry_for_symbol(&symbol).await {
+                                Ok(exp) => exp,
+                                Err(e) => return Ok(json!({
+                                    "content": [{"type": "text", "text": format!("Error fetching front expiry: {}", e)}],
+                                    "isError": true
+                                })),
+                            }
                         };
 
                         let tone_req = MarketToneRequest {
@@ -121,7 +139,7 @@ impl ServerHandler for ThetaServerState {
                             rate: None,
                             dividend: 0.0,
                             iv: None,
-                            iv_from_market_price: false,
+                            iv_from_market_price: true,
                             target_delta: 0.25,
                             target_otm_percent: 0.05,
                             smile_target_otm_percents: vec![0.05, 0.10, 0.15],
