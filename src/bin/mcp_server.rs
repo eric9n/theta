@@ -588,6 +588,25 @@ async fn read_next_mcp_payload(
     Ok(Some(trimmed.to_string()))
 }
 
+fn transform_initialize_payload(payload: &str) -> String {
+    let mut v: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return payload.to_string(),
+    };
+
+    if v.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+        if let Some(params) = v.get_mut("params") {
+            if let Some(client_info) = params.get("clientInfo").cloned() {
+                if params.get("implementation").is_none() {
+                    params.as_object_mut()
+                        .map(|o| o.insert("implementation".to_string(), client_info));
+                }
+            }
+        }
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
+}
+
 fn is_initialize_request(payload: &str) -> bool {
     serde_json::from_str::<Value>(payload)
         .ok()
@@ -634,6 +653,7 @@ async fn main() -> Result<()> {
                     if payload.trim().is_empty() {
                         continue;
                     }
+                    let payload = transform_initialize_payload(&payload);
                     let is_init = is_initialize_request(&payload);
                     if tx.send(payload).await.is_err() {
                         break;
