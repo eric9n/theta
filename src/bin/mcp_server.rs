@@ -703,12 +703,13 @@ async fn main() -> Result<()> {
                         // Compatibility: synthesized initialized notification
                         // We send both "initialized" (SDK expectation) and "notifications/initialized" (standard expectation)
                         // with a small delay to ensure the SDK has finished processing the initialize request.
+                        let tx_clone = tx.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                             let msg1 = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
                             let msg2 = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
-                            let _ = tx.send(msg1.to_string()).await;
-                            let _ = tx.send(msg2.to_string()).await;
+                            let _ = tx_clone.send(msg1.to_string()).await;
+                            let _ = tx_clone.send(msg2.to_string()).await;
                         });
                     }
                 }
