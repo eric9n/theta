@@ -55,7 +55,12 @@ impl ServerHandler for ThetaServerState {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, Error> {
+        tracing::info!("Handling method: {} with params: {:?}", method, params);
         match method {
+            "notifications/initialized" | "initialized" => {
+                tracing::info!("Client confirmed initialization");
+                Ok(json!({}))
+            }
             "tools/list" => {
                 let get_market_tone_tool = json!({
                     "name": "get_market_tone",
@@ -704,13 +709,7 @@ async fn main() -> Result<()> {
                         break;
                     }
                     if is_init {
-                        // Compatibility: synthesized initialized notification
-                        // We send both "initialized" (SDK expectation) and "notifications/initialized" (standard expectation)
-                        // immediately after the initialize request to ensure they are processed before any subsequent requests.
-                        let msg1 = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
-                        let msg2 = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
-                        let _ = tx.send(msg1.to_string()).await;
-                        let _ = tx.send(msg2.to_string()).await;
+                        tracing::info!("Initialize request received and forwarded to SDK");
                     }
                 }
                 Ok(None) => break,
