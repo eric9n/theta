@@ -61,6 +61,7 @@ anyhow = "1.0"
 async-trait = "0.1.89"
 clap = { version = "4.5.60", features = ["derive"] }
 longport = "3.0.22"
+dotenvy = "0.15"
 rust-mcp-sdk = { version = "0.8.3", features = ["server", "stdio", "macros"] }
 schemars = "0.8"
 rusqlite = { version = "0.34", features = ["bundled"] }

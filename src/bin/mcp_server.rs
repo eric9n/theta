@@ -488,6 +488,27 @@ fn default_db_path() -> Result<std::path::PathBuf> {
 
 #[tokio::main]
 async fn main() -> SdkResult<()> {
+    // Attempt to load environment from standard config paths
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let config_dir = std::path::PathBuf::from(home).join(".config").join("theta");
+    
+    // Try config.env first, then capture-signals.env
+    let config_paths = [
+        config_dir.join("config.env"),
+        config_dir.join("capture-signals.env"),
+    ];
+
+    for path in config_paths {
+        if path.exists() {
+            if let Err(e) = dotenvy::from_path(&path) {
+                eprintln!("Warning: failed to load config from {:?}: {}", path, e);
+            } else {
+                eprintln!("Loaded config from {:?}", path);
+                break;
+            }
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
