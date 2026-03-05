@@ -548,10 +548,13 @@ impl ServerHandler for ThetaServerState {
                     })),
                 }
             }
-            _ => Err(Error::protocol(
-                mcp_sdk_rs::error::ErrorCode::MethodNotFound,
-                "Method not implemented",
-            )),
+            _ => {
+                tracing::warn!("Method not handled by handler: {}", method);
+                Err(Error::protocol(
+                    mcp_sdk_rs::error::ErrorCode::MethodNotFound,
+                    "Method not implemented",
+                ))
+            }
         }
     }
 }
