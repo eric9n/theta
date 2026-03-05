@@ -3,7 +3,7 @@ use crate::analytics::ContractSide;
 use crate::domain::{
     ChainAnalysisRow, MarketToneSummary, MarketToneView, PutCallBiasView, PutCallSideTotals,
     SkewLegPoint, SkewSignalView, SmilePoint, SmileSignalView, TermStructurePoint,
-    TermStructureView,
+    TermStructureView, UnderlyingSnapshot,
 };
 use crate::market_data::parse_expiry_date;
 use crate::screening_service::ChainScreeningRequest;
@@ -68,6 +68,10 @@ pub struct ThetaSignalService {
 }
 
 impl ThetaSignalService {
+    pub async fn stock_quote(&self, symbol: &str) -> Result<UnderlyingSnapshot> {
+        self.analysis.market().fetch_underlying(symbol).await
+    }
+
     pub async fn from_env() -> Result<Self> {
         Ok(Self {
             analysis: ThetaAnalysisService::from_env().await?,

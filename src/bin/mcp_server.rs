@@ -192,6 +192,21 @@ impl ServerHandler for ThetaServerState {
                     annotations: None,
                 };
 
+                let get_stock_quote_tool = Tool {
+                    name: "get_stock_quote".to_string(),
+                    description: "Get real-time stock quote for a given symbol".to_string(),
+                    input_schema: Some(ToolSchema {
+                        properties: Some(json!({
+                            "symbol": {
+                                "type": "string",
+                                "description": "Stock symbol (e.g. TSLA.US)"
+                            }
+                        })),
+                        required: Some(vec!["symbol".to_string()]),
+                    }),
+                    annotations: None,
+                };
+
                 Ok(json!({
                     "tools": [
                         get_market_tone_tool,
@@ -202,7 +217,8 @@ impl ServerHandler for ThetaServerState {
                         get_put_call_bias_tool,
                         get_market_extreme_tool,
                         get_relative_extreme_tool,
-                        get_portfolio_tool
+                        get_portfolio_tool,
+                        get_stock_quote_tool
                     ]
                 }))
             }
@@ -212,6 +228,27 @@ impl ServerHandler for ThetaServerState {
                 let args = params.get("arguments");
 
                 match tool_name {
+                    "get_stock_quote" => {
+                        let symbol = args
+                            .and_then(|a| a.get("symbol"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("TSLA.US")
+                            .to_string();
+
+                        match self.service.stock_quote(&symbol).await {
+                            Ok(quote) => {
+                                let json_val = serde_json::to_string_pretty(&quote).unwrap_or_default();
+                                Ok(json!({
+                                    "content": [{"type": "text", "text": json_val}],
+                                    "isError": false
+                                }))
+                            }
+                            Err(e) => Ok(json!({
+                                "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                                "isError": true
+                            })),
+                        }
+                    }
                     "get_market_tone" => {
                         let symbol = args
                             .and_then(|a| a.get("symbol"))
