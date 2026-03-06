@@ -1,69 +1,87 @@
-use anyhow::{Context, Result};
-use crate::analysis_service::{AnalyzeOptionRequest, ThetaAnalysisService};
+use anyhow::Result;
+use crate::analysis_service::ThetaAnalysisService;
+use crate::analytics::{ContractSide, PricingInput, calculate_metrics, implied_volatility_from_price};
 use crate::ledger::Position;
+use crate::market_data::days_to_expiry;
 use crate::risk_domain::EnrichedPosition;
 
 /// Enrich positions with live market data and locally computed Greeks.
 ///
-/// All LongPort API calls are fired concurrently via `join_all` to minimise
-/// total latency.
+/// Uses 2 batch API calls regardless of portfolio size:
+/// 1. One call for all unique underlying stock prices.
+/// 2. One call for all option quotes.
 pub async fn enrich_positions(
     service: &ThetaAnalysisService,
     positions: &[Position],
 ) -> Result<Vec<EnrichedPosition>> {
-    // Build a futures vec — each future enriches one position independently.
-    let futures: Vec<_> = positions
+    if positions.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let market = service.market();
+
+    // Collect unique underlying symbols and option symbols
+    let mut underlying_syms: Vec<String> = {
+        let mut set = std::collections::HashSet::new();
+        for pos in positions {
+            set.insert(lp_sym(&pos.underlying));
+        }
+        set.into_iter().collect()
+    };
+    let option_lp_syms: Vec<String> = positions
         .iter()
-        .map(|pos| {
-            let service = service;
-            async move {
-                if pos.side == "stock" {
-                    enrich_stock_no_cache(service, pos).await
-                } else {
-                    enrich_option(service, pos, &mut Default::default()).await
-                }
-            }
-        })
+        .filter(|p| p.side != "stock")
+        .map(|p| lp_sym(&p.symbol))
         .collect();
 
-    let results = futures::future::join_all(futures).await;
+    // Batch call 1: all underlying prices
+    let underlying_prices = market
+        .batch_quote(&underlying_syms)
+        .await
+        .unwrap_or_default();
 
-    let enriched = results
-        .into_iter()
-        .zip(positions.iter())
-        .map(|(result, pos)| match result {
-            Ok(ep) => ep,
-            Err(e) => {
-                eprintln!(
-                    "Warning: failed to enrich position {}: {}. Using offline data.",
-                    pos.symbol, e
-                );
-                fallback_enriched(pos)
-            }
-        })
-        .collect();
+    // Batch call 2: all option prices
+    let option_quotes_vec = market
+        .batch_option_quote(&option_lp_syms)
+        .await
+        .unwrap_or_default();
+
+    // Build option price map: symbol (no .US) → last_done price
+    let mut option_price_map: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for oq in &option_quotes_vec {
+        let sym = oq.symbol.trim_end_matches(".US").to_string();
+        let price: f64 = oq.last_done.to_string().parse().unwrap_or(0.0);
+        option_price_map.insert(sym, price);
+    }
+
+    // Enrich each position
+    let rate = 0.045_f64;
+    let mut enriched = Vec::with_capacity(positions.len());
+    for pos in positions {
+        let ep = if pos.side == "stock" {
+            enrich_stock_from_map(pos, &underlying_prices)
+        } else {
+            enrich_option_from_map(pos, &option_price_map, &underlying_prices, rate)
+        };
+        enriched.push(ep);
+    }
 
     Ok(enriched)
 }
 
-async fn enrich_stock_no_cache(
-    service: &ThetaAnalysisService,
-    pos: &Position,
-) -> Result<EnrichedPosition> {
-    let mut cache = std::collections::HashMap::new();
-    enrich_stock(service, pos, &mut cache).await
+fn lp_sym(s: &str) -> String {
+    if s.contains('.') { s.to_string() } else { format!("{}.US", s) }
 }
 
-async fn enrich_stock(
-    service: &ThetaAnalysisService,
+fn enrich_stock_from_map(
     pos: &Position,
-    cache: &mut std::collections::HashMap<String, f64>,
-) -> Result<EnrichedPosition> {
-    let spot = fetch_spot_cached(service, &pos.underlying, cache).await?;
-    let pnl_per_unit = spot - pos.avg_cost;
-    let multiplier = pos.net_quantity as f64;
-
-    Ok(EnrichedPosition {
+    prices: &std::collections::HashMap<String, f64>,
+) -> EnrichedPosition {
+    let spot = prices.get(&pos.underlying).copied().unwrap_or(pos.avg_cost);
+    let sign = pos.net_quantity.signum() as f64;
+    let pnl_per_unit = (spot - pos.avg_cost) * sign;
+    EnrichedPosition {
         symbol: pos.symbol.clone(),
         underlying: pos.underlying.clone(),
         underlying_spot: Some(spot),
@@ -74,58 +92,40 @@ async fn enrich_stock(
         avg_cost: pos.avg_cost,
         current_price: spot,
         unrealized_pnl_per_unit: pnl_per_unit,
-        unrealized_pnl: pnl_per_unit * multiplier,
+        unrealized_pnl: pnl_per_unit * pos.net_quantity.unsigned_abs() as f64,
         greeks: None,
-    })
+    }
 }
 
-async fn enrich_option(
-    service: &ThetaAnalysisService,
+fn enrich_option_from_map(
     pos: &Position,
-    cache: &mut std::collections::HashMap<String, f64>,
-) -> Result<EnrichedPosition> {
-    // Build the LongPort option symbol: append .US if not already present
-    let lp_symbol = if pos.symbol.contains('.') {
-        pos.symbol.clone()
-    } else {
-        format!("{}.US", pos.symbol)
-    };
-
-    let analysis = service
-        .analyze_option(AnalyzeOptionRequest {
-            symbol: lp_symbol.clone(),
-            rate: None,
-            dividend: 0.0,
-            iv: None,
-            iv_from_option_price: None,
-            iv_from_market_price: true,
-            show_iv_diff: false,
-            use_provider_greeks: false,
-        })
-        .await
-        .with_context(|| format!("failed to analyze option {}", lp_symbol))?;
-
-    let option_price: f64 = analysis
-        .option_price
-        .parse()
-        .unwrap_or(pos.avg_cost);
-
-    let underlying_price: f64 = analysis
-        .underlying_price
-        .parse()
-        .unwrap_or(0.0);
-
-    // Cache the underlying price
-    cache.insert(pos.underlying.clone(), underlying_price);
+    option_map: &std::collections::HashMap<String, f64>,
+    underlying_prices: &std::collections::HashMap<String, f64>,
+    rate: f64,
+) -> EnrichedPosition {
+    let option_price = option_map.get(&pos.symbol).copied().unwrap_or(pos.avg_cost);
+    let spot = underlying_prices.get(&pos.underlying).copied().unwrap_or(0.0);
 
     let sign = pos.net_quantity.signum() as f64;
     let pnl_per_unit = (option_price - pos.avg_cost) * sign;
     let multiplier = pos.net_quantity.unsigned_abs() as f64 * 100.0;
 
-    Ok(EnrichedPosition {
+    // Compute local Greeks from Black-Scholes if we have enough inputs
+    let greeks = pos.expiry.as_deref().and_then(|expiry_str| {
+        let expiry = crate::market_data::parse_expiry_date(expiry_str).ok()?;
+        let dte = days_to_expiry(expiry) as f64;
+        let strike = pos.strike?;
+        if spot <= 0.0 || option_price <= 0.0 { return None; }
+        let option_type = if pos.side == "call" { ContractSide::Call } else { ContractSide::Put };
+        let iv = implied_volatility_from_price(spot, strike, rate, dte, 0.0, option_type, option_price).ok()?;
+        let input = PricingInput::new(spot, strike, rate, iv, dte, 0.0, option_type).ok()?;
+        Some(calculate_metrics(&input))
+    });
+
+    EnrichedPosition {
         symbol: pos.symbol.clone(),
         underlying: pos.underlying.clone(),
-        underlying_spot: Some(underlying_price),
+        underlying_spot: Some(spot),
         side: pos.side.clone(),
         strike: pos.strike,
         expiry: pos.expiry.clone(),
@@ -134,33 +134,12 @@ async fn enrich_option(
         current_price: option_price,
         unrealized_pnl_per_unit: pnl_per_unit,
         unrealized_pnl: pnl_per_unit * multiplier,
-        greeks: Some(analysis.local_greeks),
-    })
-}
-
-async fn fetch_spot_cached(
-    service: &ThetaAnalysisService,
-    symbol: &str,
-    cache: &mut std::collections::HashMap<String, f64>,
-) -> Result<f64> {
-    if let Some(&price) = cache.get(symbol) {
-        return Ok(price);
+        greeks,
     }
-
-    // Append .US if needed
-    let lp_symbol = if symbol.contains('.') {
-        symbol.to_string()
-    } else {
-        format!("{}.US", symbol)
-    };
-
-    let underlying = service.market().fetch_underlying(&lp_symbol).await?;
-    let price = underlying.last_done_f64;
-    cache.insert(symbol.to_string(), price);
-    Ok(price)
 }
 
 /// Fallback when live data is unavailable — use cost basis, no Greeks
+#[allow(dead_code)]
 fn fallback_enriched(pos: &Position) -> EnrichedPosition {
     EnrichedPosition {
         symbol: pos.symbol.clone(),

@@ -158,6 +158,39 @@ impl MarketDataClient {
         let days = self.ctx.trading_days(market, start, end).await.context("failed to fetch trading days")?;
         Ok(days.trading_days)
     }
+
+    /// Batch quote fetch for multiple symbols in a single API call.
+    /// Returns a HashMap of symbol → last price.
+    pub async fn batch_quote(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
+        if symbols.is_empty() {
+            return Ok(Default::default());
+        }
+        let quotes = self
+            .ctx
+            .quote(symbols.iter().map(String::as_str))
+            .await
+            .context("failed to batch fetch quotes")?;
+        let mut map = std::collections::HashMap::new();
+        for q in quotes {
+            if let Ok(price) = decimal_to_f64(&q.last_done, "last_done") {
+                // Strip .US suffix for lookup key
+                let sym = q.symbol.trim_end_matches(".US").to_string();
+                map.insert(sym, price);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Batch option quote fetch for multiple option symbols in a single API call.
+    pub async fn batch_option_quote(&self, symbols: &[String]) -> Result<Vec<longport::quote::OptionQuote>> {
+        if symbols.is_empty() {
+            return Ok(vec![]);
+        }
+        self.ctx
+            .option_quote(symbols.iter().map(String::as_str))
+            .await
+            .context("failed to batch fetch option quotes")
+    }
 }
 
 pub fn credentials_ready() -> bool {
