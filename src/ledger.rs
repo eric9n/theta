@@ -289,21 +289,6 @@ impl Ledger {
         margin_enabled: bool,
         notes: &str,
     ) -> Result<()> {
-        ensure!(trade_date_cash >= 0.0, "trade_date_cash must be non-negative");
-        ensure!(settled_cash >= 0.0, "settled_cash must be non-negative");
-        if let Some(obp) = option_buying_power {
-            ensure!(obp >= 0.0, "option_buying_power must be non-negative");
-        }
-        if let Some(sbp) = stock_buying_power {
-            ensure!(sbp >= 0.0, "stock_buying_power must be non-negative");
-        }
-        if let Some(ml) = margin_loan {
-            ensure!(ml >= 0.0, "margin_loan must be non-negative");
-        }
-        if let Some(smv) = short_market_value {
-            ensure!(smv >= 0.0, "short_market_value must be non-negative");
-        }
-
         self.conn.execute(
             "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
