@@ -56,6 +56,10 @@ path = "src/bin/term_structure.rs"
 name = "mcp-server"
 path = "src/bin/mcp_server.rs"
 
+[[bin]]
+name = "account-monitor"
+path = "src/bin/account_monitor.rs"
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1.89"

@@ -23,5 +23,12 @@ if [[ "${SERVICE_NAME}" == capture-signals* ]]; then
     sudo systemctl daemon-reload
 fi
 
+# Automatically update the systemd service file if it targets account-monitor
+if [[ "${SERVICE_NAME}" == account-monitor* ]]; then
+    echo "Updating systemd service file for ${SERVICE_NAME}..."
+    sudo cp deploy/account-monitor.service "/etc/systemd/system/${SERVICE_NAME}.service"
+    sudo systemctl daemon-reload
+fi
+
 sudo systemctl restart "${SERVICE_NAME}"
 sudo systemctl status "${SERVICE_NAME}" --no-pager --lines=20

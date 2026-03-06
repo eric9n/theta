@@ -69,6 +69,28 @@ pub struct AccountSnapshot {
     pub account_id: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AccountMonitorSnapshotInput {
+    pub captured_at: String,
+    pub account_id: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub trade_date_cash: Option<f64>,
+    pub settled_cash: Option<f64>,
+    pub margin_loan: Option<f64>,
+    pub option_buying_power: Option<f64>,
+    pub positions_count: Option<i64>,
+    pub position_market_value: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub total_margin_required: Option<f64>,
+    pub net_delta_shares: Option<f64>,
+    pub total_gamma: Option<f64>,
+    pub total_theta_per_day: Option<f64>,
+    pub total_vega: Option<f64>,
+    pub equity_estimate: Option<f64>,
+    pub notes: String,
+}
+
 // ---------------------------------------------------------------------------
 // Query filters
 // ---------------------------------------------------------------------------
@@ -154,7 +176,34 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS idx_account_snapshots_time
                 ON account_snapshots(snapshot_at);
             CREATE INDEX IF NOT EXISTS idx_account_snapshots_account
-                ON account_snapshots(account_id);",
+                ON account_snapshots(account_id);
+
+            CREATE TABLE IF NOT EXISTS account_monitor_snapshots (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at           TEXT    NOT NULL,
+                account_id            TEXT    NOT NULL,
+                status                TEXT    NOT NULL,
+                error_message         TEXT,
+                trade_date_cash       REAL,
+                settled_cash          REAL,
+                margin_loan           REAL,
+                option_buying_power   REAL,
+                positions_count       INTEGER,
+                position_market_value REAL,
+                unrealized_pnl        REAL,
+                total_margin_required REAL,
+                net_delta_shares      REAL,
+                total_gamma           REAL,
+                total_theta_per_day   REAL,
+                total_vega            REAL,
+                equity_estimate       REAL,
+                notes                 TEXT    NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_account_monitor_snapshots_time
+                ON account_monitor_snapshots(captured_at);
+            CREATE INDEX IF NOT EXISTS idx_account_monitor_snapshots_account
+                ON account_monitor_snapshots(account_id, captured_at);",
         )?;
         Ok(())
     }
@@ -317,6 +366,56 @@ impl Ledger {
                 notes,
                 account_id,
              ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn record_account_monitor_snapshot(
+        &self,
+        input: &AccountMonitorSnapshotInput,
+    ) -> Result<i64> {
+        ensure!(
+            !input.captured_at.trim().is_empty(),
+            "captured_at must not be empty"
+        );
+        ensure!(
+            !input.account_id.trim().is_empty(),
+            "account_id must not be empty"
+        );
+        ensure!(
+            matches!(input.status.as_str(), "ok" | "error"),
+            "invalid status: {}",
+            input.status
+        );
+
+        self.conn.execute(
+            "INSERT INTO account_monitor_snapshots (
+                captured_at, account_id, status, error_message,
+                trade_date_cash, settled_cash, margin_loan, option_buying_power,
+                positions_count, position_market_value, unrealized_pnl,
+                total_margin_required, net_delta_shares, total_gamma,
+                total_theta_per_day, total_vega, equity_estimate, notes
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                &input.captured_at,
+                &input.account_id,
+                &input.status,
+                &input.error_message,
+                input.trade_date_cash,
+                input.settled_cash,
+                input.margin_loan,
+                input.option_buying_power,
+                input.positions_count,
+                input.position_market_value,
+                input.unrealized_pnl,
+                input.total_margin_required,
+                input.net_delta_shares,
+                input.total_gamma,
+                input.total_theta_per_day,
+                input.total_vega,
+                input.equity_estimate,
+                &input.notes,
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -888,5 +987,96 @@ mod tests {
 
         let positions = ledger.calculate_positions("firstrade", None).unwrap();
         assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn account_monitor_snapshots_roundtrip_ok() {
+        let ledger = in_memory_ledger();
+        let id = ledger
+            .record_account_monitor_snapshot(&AccountMonitorSnapshotInput {
+                captured_at: "2026-03-06T14:35:00Z".to_string(),
+                account_id: "firstrade".to_string(),
+                status: "ok".to_string(),
+                error_message: None,
+                trade_date_cash: Some(12_000.0),
+                settled_cash: Some(11_500.0),
+                margin_loan: Some(2_000.0),
+                option_buying_power: Some(8_000.0),
+                positions_count: Some(3),
+                position_market_value: Some(25_000.0),
+                unrealized_pnl: Some(320.5),
+                total_margin_required: Some(1_200.0),
+                net_delta_shares: Some(45.0),
+                total_gamma: Some(-0.2),
+                total_theta_per_day: Some(6.0),
+                total_vega: Some(40.0),
+                equity_estimate: Some(34_500.0),
+                notes: "monitor tick".to_string(),
+            })
+            .unwrap();
+        assert_eq!(id, 1);
+
+        let mut stmt = ledger
+            .conn
+            .prepare(
+                "SELECT status, account_id, positions_count, equity_estimate, notes
+                 FROM account_monitor_snapshots
+                 WHERE id = ?1",
+            )
+            .unwrap();
+        let row = stmt
+            .query_row(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(row.0, "ok");
+        assert_eq!(row.1, "firstrade");
+        assert_eq!(row.2, Some(3));
+        assert_eq!(row.3, Some(34_500.0));
+        assert_eq!(row.4, "monitor tick");
+    }
+
+    #[test]
+    fn account_monitor_snapshots_roundtrip_error() {
+        let ledger = in_memory_ledger();
+        let id = ledger
+            .record_account_monitor_snapshot(&AccountMonitorSnapshotInput {
+                captured_at: "2026-03-06T14:40:00Z".to_string(),
+                account_id: "firstrade".to_string(),
+                status: "error".to_string(),
+                error_message: Some("failed to enrich positions".to_string()),
+                notes: "monitor tick".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut stmt = ledger
+            .conn
+            .prepare(
+                "SELECT status, error_message, trade_date_cash
+                 FROM account_monitor_snapshots
+                 WHERE id = ?1",
+            )
+            .unwrap();
+        let row = stmt
+            .query_row(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(row.0, "error");
+        assert_eq!(row.1.as_deref(), Some("failed to enrich positions"));
+        assert_eq!(row.2, None);
     }
 }
