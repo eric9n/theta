@@ -1,282 +1,301 @@
 ---
 name: portfolio
-description: Use when the user wants theta's portfolio ledger for account snapshots, trade recording, position inspection, strategy and margin reports, or expiry settlement workflows.
+description: Use when the user wants theta's portfolio ledger for account snapshots, trade recording, position inspection, strategy and margin reports, settlement flows, or account cash events (deposit/withdraw/dividend).
 ---
 
 # portfolio
 
-This skill is intended to compile cleanly into a Tellar `SKILL.json` with multiple explicit tools.
-Use the bundled wrapper script instead of `cargo run`.
-
-Use this skill only for the `portfolio` bin in theta:
+Use this skill only for theta's `portfolio` binary via wrapper:
 
 ```bash
 ./scripts/portfolio.sh --help
 ```
 
-## Compilation intent
-
-When compiling this skill into `SKILL.json`, prefer a separate Tellar tool for each workflow below.
-Do not collapse everything into one generic tool if the compiler can preserve the tool list.
-Each tool should execute the exact command template shown here.
-
 ## Shared rules
 
-- All tool commands should call `./scripts/portfolio.sh ...`.
-- The wrapper script locates the theta repository root relative to the skill directory and executes the built release binary.
-- If the release binary is missing, the script fails and instructs the user to build `cargo build --release --bin portfolio` first.
-- Optional `db` means append `--db <path>` immediately after `./scripts/portfolio.sh`.
-- `strategies` and `report` require at least one stored account snapshot.
-- Lifecycle writes validate that matching open option positions exist before writing.
-- Multi-step writes are wrapped in SQLite transactions.
-- `settle-expiries --apply` refuses partial settlement if settlement prices are missing or validation fails.
+- Always execute through `./scripts/portfolio.sh ...`.
+- If the release binary is missing, build with `cargo build --release --bin portfolio`.
+- Optional global flags:
+  - `--db <path>` right after `./scripts/portfolio.sh`
+  - `--account <account_id>` right after optional `--db`
+- `strategies` and `report` require an existing account snapshot.
+- `settle-expiries --apply` should be preceded by a dry-run and fails if settlement prices or position validation are incomplete.
 
 ## Tool definitions
 
 ### Tool: account_set
 
-Purpose: create or append an account snapshot used by `strategies` and `report`.
+Purpose: append an account snapshot used by strategy/report calculations.
 
 Required parameters:
-- `cash_balance` (number)
+- `trade_date_cash` (number)
+- `settled_cash` (number)
 
 Optional parameters:
 - `option_buying_power` (number)
-- `cash_account` (boolean)
-- `at` (string, RFC3339 timestamp)
-- `notes` (string)
+- `stock_buying_power` (number)
+- `margin_loan` (number)
+- `short_market_value` (number)
+- `margin` (boolean flag)
 - `db` (string path)
+- `account` (string account id)
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] account set --cash-balance <cash_balance> [--option-buying-power <option_buying_power>] [--cash-account] [--at <at>] [--notes <notes>]
+./scripts/portfolio.sh [--db <db>] [--account <account>] account set --trade-date-cash <trade_date_cash> --settled-cash <settled_cash> [--option-buying-power <option_buying_power>] [--stock-buying-power <stock_buying_power>] [--margin-loan <margin_loan>] [--short-market-value <short_market_value>] [--margin]
 ```
 
 ### Tool: account_show
 
-Purpose: show the latest account snapshot.
+Purpose: show latest account snapshot.
 
 Optional parameters:
 - `json` (boolean)
 - `db` (string path)
+- `account` (string account id)
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] account show [--json]
+./scripts/portfolio.sh [--db <db>] [--account <account>] account show [--json]
 ```
 
 ### Tool: account_history
 
-Purpose: list recent account snapshots.
+Purpose: list account snapshot history.
 
 Optional parameters:
 - `limit` (integer)
 - `json` (boolean)
 - `db` (string path)
+- `account` (string account id)
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] account history [--limit <limit>] [--json]
+./scripts/portfolio.sh [--db <db>] [--account <account>] account history [--limit <limit>] [--json]
 ```
 
 ### Tool: trade_buy
 
-Purpose: record an opening or increasing buy trade for stock or options.
+Purpose: record buy trade for stock/options.
 
 Required parameters:
 - `symbol` (string)
 - `underlying` (string)
 - `quantity` (integer, positive)
 - `price` (number, positive)
-- `side` (string enum: `call`, `put`, `stock`)
+- `side` (enum: `call`, `put`, `stock`)
 
 Conditional required parameters:
-- `strike` (number) when `side` is `call` or `put`
-- `expiry` (string, YYYY-MM-DD) when `side` is `call` or `put`
+- `strike` when `side` is option
+- `expiry` when `side` is option (`YYYY-MM-DD`)
 
 Optional parameters:
-- `commission` (number, non-negative)
-- `date` (string, YYYY-MM-DD)
+- `commission` (number)
+- `date` (string `YYYY-MM-DD`)
 - `notes` (string)
 - `db` (string path)
+- `account` (string account id)
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade buy --symbol <symbol> --underlying <underlying> --quantity <quantity> --price <price> --side <side> [--strike <strike>] [--expiry <expiry>] [--commission <commission>] [--date <date>] [--notes <notes>]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade buy --symbol <symbol> --underlying <underlying> --quantity <quantity> --price <price> --side <side> [--strike <strike>] [--expiry <expiry>] [--commission <commission>] [--date <date>] [--notes <notes>]
 ```
 
 ### Tool: trade_sell
 
-Purpose: record an opening or reducing sell trade for stock or options.
+Purpose: record sell trade for stock/options.
 
-Required parameters:
-- `symbol` (string)
-- `underlying` (string)
-- `quantity` (integer, positive)
-- `price` (number, positive)
-- `side` (string enum: `call`, `put`, `stock`)
-
-Conditional required parameters:
-- `strike` (number) when `side` is `call` or `put`
-- `expiry` (string, YYYY-MM-DD) when `side` is `call` or `put`
-
-Optional parameters:
-- `commission` (number, non-negative)
-- `date` (string, YYYY-MM-DD)
-- `notes` (string)
-- `db` (string path)
+Required and optional parameters are the same as `trade_buy`.
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade sell --symbol <symbol> --underlying <underlying> --quantity <quantity> --price <price> --side <side> [--strike <strike>] [--expiry <expiry>] [--commission <commission>] [--date <date>] [--notes <notes>]
-```
-
-### Tool: positions
-
-Purpose: reconstruct and display current open positions from the ledger.
-
-Optional parameters:
-- `underlying` (string)
-- `json` (boolean)
-- `db` (string path)
-
-Command template:
-
-```bash
-./scripts/portfolio.sh [--db <db>] positions [--underlying <underlying>] [--json]
-```
-
-### Tool: strategies
-
-Purpose: identify strategies and compute margin-aware strategy output using the latest account snapshot.
-
-Optional parameters:
-- `underlying` (string)
-- `json` (boolean)
-- `db` (string path)
-
-Command template:
-
-```bash
-./scripts/portfolio.sh [--db <db>] strategies [--underlying <underlying>] [--json]
-```
-
-### Tool: report
-
-Purpose: produce the full portfolio report, including positions, strategies, margin, and Greeks.
-
-Optional parameters:
-- `underlying` (string)
-- `offline` (boolean)
-- `json` (boolean)
-- `db` (string path)
-
-Command template:
-
-```bash
-./scripts/portfolio.sh [--db <db>] report [--underlying <underlying>] [--offline] [--json]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade sell --symbol <symbol> --underlying <underlying> --quantity <quantity> --price <price> --side <side> [--strike <strike>] [--expiry <expiry>] [--commission <commission>] [--date <date>] [--notes <notes>]
 ```
 
 ### Tool: trade_exercise
 
-Purpose: record a long option exercise. This closes the option and inserts the stock delivery leg.
+Purpose: record long option exercise and stock delivery leg.
 
 Required parameters:
-- `symbol` (string)
-- `underlying` (string)
-- `quantity` (integer, positive)
-- `side` (string enum: `call`, `put`)
-- `strike` (number)
-- `expiry` (string, YYYY-MM-DD)
+- `symbol`, `underlying`, `quantity`, `side`, `strike`, `expiry`
 
 Optional parameters:
-- `commission` (number, non-negative)
-- `date` (string, YYYY-MM-DD)
-- `notes` (string)
-- `db` (string path)
+- `commission`, `date`, `notes`, `db`, `account`
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade exercise --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade exercise --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
 ```
 
 ### Tool: trade_assign
 
-Purpose: record a short option assignment. This closes the option and inserts the stock delivery leg.
+Purpose: record short option assignment and stock delivery leg.
 
-Required parameters:
-- `symbol` (string)
-- `underlying` (string)
-- `quantity` (integer, positive)
-- `side` (string enum: `call`, `put`)
-- `strike` (number)
-- `expiry` (string, YYYY-MM-DD)
-
-Optional parameters:
-- `commission` (number, non-negative)
-- `date` (string, YYYY-MM-DD)
-- `notes` (string)
-- `db` (string path)
+Required/optional parameters are the same as `trade_exercise`.
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade assign --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade assign --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
 ```
 
 ### Tool: trade_expire
 
-Purpose: record an option expiry at zero value.
+Purpose: record option expiry at zero value.
 
 Required parameters:
 - `symbol` (string)
 - `underlying` (string)
-- `quantity` (integer, positive)
-- `side` (string enum: `call`, `put`)
-- `position` (string enum: `long`, `short`)
+- `quantity` (integer)
+- `side` (enum: `call`, `put`)
+- `position` (enum: `long`, `short`)
 - `strike` (number)
-- `expiry` (string, YYYY-MM-DD)
+- `expiry` (string `YYYY-MM-DD`)
 
 Optional parameters:
-- `commission` (number, non-negative)
-- `date` (string, YYYY-MM-DD)
-- `notes` (string)
-- `db` (string path)
+- `commission`, `date`, `notes`, `db`, `account`
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade expire --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --position <position> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade expire --symbol <symbol> --underlying <underlying> --quantity <quantity> --side <side> --position <position> --strike <strike> --expiry <expiry> [--commission <commission>] [--date <date>] [--notes <notes>]
 ```
 
 ### Tool: settle_expiries
 
-Purpose: scan expired open option positions and classify them as `expire`, `exercise`, or `assignment` using provided settlement prices. Dry-run by default; `apply` writes the generated settlement events.
+Purpose: dry-run or apply batch settlement for expired options.
 
 Required parameters:
-- `settlement_prices` (array of strings in `SYMBOL=PRICE` form)
+- `settlement_prices` (array of `SYMBOL=PRICE`)
 
 Optional parameters:
-- `date` (string, YYYY-MM-DD)
-- `underlying` (string)
-- `apply` (boolean)
-- `json` (boolean)
-- `db` (string path)
+- `date`, `underlying`, `apply`, `json`, `db`, `account`
 
 Command template:
 
 ```bash
-./scripts/portfolio.sh [--db <db>] trade settle-expiries [--date <date>] [--underlying <underlying>] --settlement-price <symbol_price_1> [--settlement-price <symbol_price_2> ...] [--apply] [--json]
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade settle-expiries [--date <date>] [--underlying <underlying>] --settlement-price <symbol_price_1> [--settlement-price <symbol_price_2> ...] [--apply] [--json]
 ```
 
-Validation rules:
-- Dry-run should be preferred before `--apply`.
-- If any settlement price is missing, `--apply` fails.
-- If any matching position is missing or quantity is insufficient, `--apply` fails.
-- `--apply` performs the entire batch in one SQLite transaction.
+### Tool: trade_list
+
+Purpose: list historical trades with optional filters.
+
+Optional parameters:
+- `underlying`, `symbol`, `from`, `to`, `json`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade list [--underlying <underlying>] [--symbol <symbol>] [--from <from>] [--to <to>] [--json]
+```
+
+### Tool: trade_delete
+
+Purpose: delete one trade by id.
+
+Required parameters:
+- `id` (integer)
+
+Optional parameters:
+- `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade delete <id>
+```
+
+### Tool: trade_deposit
+
+Purpose: record cash deposit.
+
+Required parameters:
+- `amount` (number)
+
+Optional parameters:
+- `date`, `notes`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade deposit --amount <amount> [--date <date>] [--notes <notes>]
+```
+
+### Tool: trade_withdraw
+
+Purpose: record cash withdrawal.
+
+Required parameters:
+- `amount` (number)
+
+Optional parameters:
+- `date`, `notes`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade withdraw --amount <amount> [--date <date>] [--notes <notes>]
+```
+
+### Tool: trade_dividend
+
+Purpose: record dividend cash event.
+
+Required parameters:
+- `underlying` (string)
+- `amount` (number)
+
+Optional parameters:
+- `date`, `notes`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] trade dividend --underlying <underlying> --amount <amount> [--date <date>] [--notes <notes>]
+```
+
+### Tool: positions
+
+Purpose: show reconstructed open positions.
+
+Optional parameters:
+- `underlying`, `json`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] positions [--underlying <underlying>] [--json]
+```
+
+### Tool: strategies
+
+Purpose: identify strategies and margin usage.
+
+Optional parameters:
+- `underlying`, `json`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] strategies [--underlying <underlying>] [--json]
+```
+
+### Tool: report
+
+Purpose: produce portfolio report with live/offline pricing and Greeks.
+
+Optional parameters:
+- `underlying`, `offline`, `json`, `db`, `account`
+
+Command template:
+
+```bash
+./scripts/portfolio.sh [--db <db>] [--account <account>] report [--underlying <underlying>] [--offline] [--json]
+```
