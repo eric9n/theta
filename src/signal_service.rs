@@ -78,6 +78,12 @@ impl ThetaSignalService {
         })
     }
 
+    /// Returns the underlying analysis service, allowing callers to reuse
+    /// the pre-initialized LongPort connection instead of creating a new one.
+    pub fn analysis(&self) -> &ThetaAnalysisService {
+        &self.analysis
+    }
+
     pub async fn front_expiry_for_symbol(&self, symbol: &str) -> Result<time::Date> {
         let expiry = self
             .analysis

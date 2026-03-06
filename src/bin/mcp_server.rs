@@ -459,12 +459,9 @@ impl ServerHandler for ThetaHandler {
                     margin_enabled: account_snapshot.margin_enabled,
                 };
                 
-                let analysis_service = match theta::analysis_service::ThetaAnalysisService::from_env().await {
-                    Ok(service) => service,
-                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error loading analysis service: {}", e).into()])),
-                };
+                let analysis_service = self.state.service.analysis();
                 
-                let enriched = match portfolio_service::enrich_positions(&analysis_service, &positions).await {
+                let enriched = match portfolio_service::enrich_positions(analysis_service, &positions).await {
                     Ok(e) => e,
                     Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error enriching positions: {}", e).into()])),
                 };
