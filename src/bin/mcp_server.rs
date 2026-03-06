@@ -136,6 +136,8 @@ struct GetRelativeExtremeArgs {
 )]
 #[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
 struct GetPortfolioArgs {
+    /// Associated brokerage account (default: "firstrade", alternative: "longbridge")
+    account: Option<String>,
     /// Initial margin ratio assumption (default 0.3)
     margin_ratio: Option<f64>,
 }
@@ -416,9 +418,18 @@ impl ServerHandler for ThetaHandler {
                 ]))
             }
             "get_portfolio" => {
-                let _args: GetPortfolioArgs = self.parse_args(params.arguments)?;
+                let args: GetPortfolioArgs = self.parse_args(params.arguments)?;
                 
-                let ledger = Ledger::open(&s.db_path).map_err(|e| CallToolError::from_message(format!("Failed to open ledger: {}", e)))?; 
+                // Determine ledger db path based on account arg
+                let account_name = args.account.as_deref().unwrap_or("firstrade").to_lowercase();
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+                let ledger_db_path = if account_name == "longbridge" {
+                    std::path::PathBuf::from(&home).join(".theta").join("longbridge.db")
+                } else {
+                    std::path::PathBuf::from(&home).join(".theta").join("portfolio.db")
+                };
+
+                let ledger = Ledger::open(&ledger_db_path).map_err(|e| CallToolError::from_message(format!("Failed to open ledger at {:?}: {}", ledger_db_path, e)))?; 
                 
                 let positions: Vec<Position> = match ledger.calculate_positions(None) {
                     Ok(p) => p,
