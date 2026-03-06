@@ -5,42 +5,53 @@ use crate::risk_domain::EnrichedPosition;
 
 /// Enrich positions with live market data and locally computed Greeks.
 ///
-/// For each option position:
-///   - Fetches live underlying price and option price from LongPort
-///   - Recalculates IV and Greeks via Black-Scholes (no reliance on provider Greeks)
-///
-/// For each stock position:
-///   - Fetches live underlying price from LongPort
+/// All LongPort API calls are fired concurrently via `join_all` to minimise
+/// total latency.
 pub async fn enrich_positions(
     service: &ThetaAnalysisService,
     positions: &[Position],
 ) -> Result<Vec<EnrichedPosition>> {
-    let mut enriched = Vec::with_capacity(positions.len());
+    // Build a futures vec — each future enriches one position independently.
+    let futures: Vec<_> = positions
+        .iter()
+        .map(|pos| {
+            let service = service;
+            async move {
+                if pos.side == "stock" {
+                    enrich_stock_no_cache(service, pos).await
+                } else {
+                    enrich_option(service, pos, &mut Default::default()).await
+                }
+            }
+        })
+        .collect();
 
-    // Cache underlying prices to avoid redundant fetches
-    let mut underlying_prices: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
+    let results = futures::future::join_all(futures).await;
 
-    for pos in positions {
-        let result = if pos.side == "stock" {
-            enrich_stock(service, pos, &mut underlying_prices).await
-        } else {
-            enrich_option(service, pos, &mut underlying_prices).await
-        };
-
-        match result {
-            Ok(ep) => enriched.push(ep),
+    let enriched = results
+        .into_iter()
+        .zip(positions.iter())
+        .map(|(result, pos)| match result {
+            Ok(ep) => ep,
             Err(e) => {
                 eprintln!(
                     "Warning: failed to enrich position {}: {}. Using offline data.",
                     pos.symbol, e
                 );
-                enriched.push(fallback_enriched(pos));
+                fallback_enriched(pos)
             }
-        }
-    }
+        })
+        .collect();
 
     Ok(enriched)
+}
+
+async fn enrich_stock_no_cache(
+    service: &ThetaAnalysisService,
+    pos: &Position,
+) -> Result<EnrichedPosition> {
+    let mut cache = std::collections::HashMap::new();
+    enrich_stock(service, pos, &mut cache).await
 }
 
 async fn enrich_stock(

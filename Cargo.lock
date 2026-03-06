@@ -2497,6 +2497,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dotenvy",
+ "futures",
  "longport",
  "rusqlite",
  "rust-mcp-sdk",
