@@ -1556,7 +1556,7 @@ async fn fetch_portfolio_enrichment(ledger: &Ledger) -> MarketContext {
     let start = today - time::Duration::days(60); // Cover historical trades in recent history
     let end = today + time::Duration::days(30);
 
-    let calendar = svc.market().fetch_trading_days(longport::Market::US, start, end).await.ok();
+    let calendar = svc.market().fetch_trading_days(theta::market_data::Market::US, start, end).await.ok();
 
     MarketContext { enriched, calendar }
 }

@@ -1,9 +1,9 @@
 use crate::analytics::{ContractSide, OptionMetrics};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use time::Date;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnderlyingSnapshot {
     pub symbol: String,
     pub last_done: String,
@@ -22,7 +22,7 @@ pub struct UnderlyingSnapshot {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionContractSnapshot {
     pub symbol: String,
     pub underlying_symbol: String,
@@ -101,7 +101,7 @@ pub struct ContractDiagnostics {
     pub liquidity_flags: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProviderGreeks {
     pub delta: Option<String>,
     pub gamma: Option<String>,

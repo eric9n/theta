@@ -46,7 +46,7 @@ pub struct ThetaService {
 impl ThetaService {
     pub async fn from_env() -> Result<Self> {
         Ok(Self {
-            market: MarketDataClient::from_env().await?,
+            market: MarketDataClient::connect().await?,
         })
     }
 

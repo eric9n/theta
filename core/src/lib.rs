@@ -15,3 +15,4 @@ pub mod screening_service;
 pub mod signal_service;
 pub mod snapshot_store;
 pub mod strategy_service;
+pub mod daemon_protocol;

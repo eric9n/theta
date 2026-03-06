@@ -8,7 +8,7 @@ use theta::domain::{
     ChainAnalysisView, NormalizedOptionChainSnapshot, OptionAnalysisView, OptionContractSnapshot,
     normalize_option_chain,
 };
-use theta::market_data::{credentials_ready, parse_expiry_date};
+use theta::market_data::parse_expiry_date;
 use serde::Serialize;
 use theta::screening_service::{ChainScreeningRequest, ChainSortField};
 use theta::strategy_service::{
@@ -48,13 +48,6 @@ enum Command {
         option_type: ContractSide,
         #[arg(long)]
         json: bool,
-    },
-    /// Show whether API credentials are configured
-    Config,
-    /// Verify access with a basic quote request
-    Probe {
-        #[arg(long, default_value = "TSLA.US")]
-        symbol: String,
     },
     /// Fetch realtime quote for a stock
     StockQuote {
@@ -688,20 +681,7 @@ enum Command {
     },
 }
 
-#[derive(Debug, Serialize)]
-struct LongbridgeConfigStatus {
-    app_key_configured: bool,
-    app_secret_configured: bool,
-    access_token_configured: bool,
-    ready: bool,
-}
 
-#[derive(Debug, Serialize)]
-struct ProbeResult {
-    ok: bool,
-    symbol: String,
-    quotes: usize,
-}
 
 #[derive(Debug, Serialize)]
 struct StockQuoteView {
@@ -742,20 +722,6 @@ async fn main() -> Result<()> {
             )?;
             let metrics = calculate_metrics(&input);
             render_metrics(&metrics, json)?;
-        }
-        Command::Config => {
-                let status = LongbridgeConfigStatus::from_env();
-                println!("{}", serde_json::to_string_pretty(&status)?);
-        }
-        Command::Probe { symbol } => {
-                let service = ThetaAnalysisService::from_env().await?;
-                let quotes = service.market().probe(&symbol).await?;
-                let result = ProbeResult {
-                    ok: true,
-                    symbol,
-                    quotes,
-                };
-                println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::StockQuote { symbol } => {
                 let service = ThetaAnalysisService::from_env().await?;
@@ -1481,30 +1447,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-impl LongbridgeConfigStatus {
-    fn from_env() -> Self {
-        let app_key_configured = std::env::var("LONGPORT_APP_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some();
-        let app_secret_configured = std::env::var("LONGPORT_APP_SECRET")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some();
-        let access_token_configured = std::env::var("LONGPORT_ACCESS_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some();
-
-        Self {
-            app_key_configured,
-            app_secret_configured,
-            access_token_configured,
-            ready: credentials_ready(),
-        }
-    }
 }
 
 fn render_metrics(metrics: &OptionMetrics, json: bool) -> Result<()> {

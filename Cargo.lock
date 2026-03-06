@@ -2498,7 +2498,6 @@ dependencies = [
  "clap",
  "dotenvy",
  "futures",
- "longport",
  "rusqlite",
  "rust-mcp-sdk",
  "rustls",
@@ -2508,6 +2507,22 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "theta-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "longport",
+ "rustls",
+ "serde",
+ "serde_json",
+ "theta",
+ "time",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

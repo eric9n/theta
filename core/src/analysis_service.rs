@@ -41,7 +41,7 @@ impl ThetaAnalysisService {
     pub async fn from_env() -> Result<Self> {
         let config = AppConfig::load()?;
         Ok(Self {
-            market: MarketDataClient::from_env().await?,
+            market: MarketDataClient::connect().await?,
             rate_curve: config.rate_curve,
         })
     }

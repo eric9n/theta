@@ -1,0 +1,21 @@
+[package]
+name = "theta-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+theta = { path = "../core" }
+anyhow = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+serde_json = "1.0"
+longport = "3.0.22"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+rustls = { version = "0.23", features = ["ring"] }
+serde = { version = "1.0", features = ["derive"] }
+time = { version = "0.3", features = [
+  "parsing",
+  "formatting",
+  "macros",
+  "serde",
+] }

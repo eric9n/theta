@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
 use clap::ValueEnum;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::f64::consts::{PI, SQRT_2};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Default)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ContractSide {
     #[default]
