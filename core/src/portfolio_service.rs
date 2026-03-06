@@ -21,7 +21,7 @@ pub async fn enrich_positions(
     let market = service.market();
 
     // Collect unique underlying symbols and option symbols
-    let mut underlying_syms: Vec<String> = {
+    let underlying_syms: Vec<String> = {
         let mut set = std::collections::HashSet::new();
         for pos in positions {
             set.insert(lp_sym(&pos.underlying));
@@ -74,11 +74,18 @@ fn lp_sym(s: &str) -> String {
     if s.contains('.') { s.to_string() } else { format!("{}.US", s) }
 }
 
+fn quote_key(s: &str) -> &str {
+    s.trim_end_matches(".US")
+}
+
 fn enrich_stock_from_map(
     pos: &Position,
     prices: &std::collections::HashMap<String, f64>,
 ) -> EnrichedPosition {
-    let spot = prices.get(&pos.underlying).copied().unwrap_or(pos.avg_cost);
+    let spot = prices
+        .get(quote_key(&pos.underlying))
+        .copied()
+        .unwrap_or(pos.avg_cost);
     let sign = pos.net_quantity.signum() as f64;
     let pnl_per_unit = (spot - pos.avg_cost) * sign;
     EnrichedPosition {
@@ -103,8 +110,14 @@ fn enrich_option_from_map(
     underlying_prices: &std::collections::HashMap<String, f64>,
     rate: f64,
 ) -> EnrichedPosition {
-    let option_price = option_map.get(&pos.symbol).copied().unwrap_or(pos.avg_cost);
-    let spot = underlying_prices.get(&pos.underlying).copied().unwrap_or(0.0);
+    let option_price = option_map
+        .get(quote_key(&pos.symbol))
+        .copied()
+        .unwrap_or(pos.avg_cost);
+    let spot = underlying_prices
+        .get(quote_key(&pos.underlying))
+        .copied()
+        .unwrap_or(0.0);
 
     let sign = pos.net_quantity.signum() as f64;
     let pnl_per_unit = (option_price - pos.avg_cost) * sign;
