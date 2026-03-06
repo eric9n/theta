@@ -68,15 +68,17 @@ enum AccountAction {
         #[arg(long, help = "Trade-date cash balance (immediate)")]
         trade_date_cash: f64,
         #[arg(long, help = "Settled cash balance (T+1)")]
-        settled_cash: Option<f64>,
+        settled_cash: f64,
         #[arg(long, help = "Option buying power")]
         option_buying_power: Option<f64>,
-        #[arg(long, help = "Treat snapshot as a cash account (no margin enabled)")]
-        cash_account: bool,
-        #[arg(long, help = "Snapshot timestamp in RFC3339; default: now")]
-        at: Option<String>,
-        #[arg(long, default_value = "", help = "Notes")]
-        notes: String,
+        #[arg(long, help = "Stock buying power")]
+        stock_buying_power: Option<f64>,
+        #[arg(long, help = "Margin loan balance")]
+        margin_loan: Option<f64>,
+        #[arg(long, help = "Short market value")]
+        short_market_value: Option<f64>,
+        #[arg(long, default_value_t = true)]
+        margin: bool,
     },
     /// Show the latest account snapshot
     Show {
@@ -1100,26 +1102,24 @@ fn handle_account(ledger: &Ledger, action: AccountAction) -> Result<()> {
             trade_date_cash,
             settled_cash,
             option_buying_power,
-            cash_account,
-            at,
-            notes,
+            stock_buying_power,
+            margin_loan,
+            short_market_value,
+            margin,
         } => {
-            let snapshot_at = at.unwrap_or_else(now_rfc3339);
-            let settled = settled_cash.unwrap_or(trade_date_cash);
-            let id = ledger.record_account_snapshot(
+            let snapshot_at = now_rfc3339();
+            ledger.record_account_snapshot(
                 &snapshot_at,
                 trade_date_cash,
-                settled,
+                settled_cash,
                 option_buying_power,
-                !cash_account,
-                &notes,
+                stock_buying_power,
+                margin_loan,
+                short_market_value,
+                margin,
+                "manual set",
             )?;
-            println!(
-                "Recorded account snapshot #{id} at {snapshot_at}: trade-date cash=${trade_date_cash:.2}, settled cash=${settled:.2}{}",
-                option_buying_power
-                    .map(|obp| format!(", option buying power=${obp:.2}"))
-                    .unwrap_or_default(),
-            );
+            println!("Account snapshot recorded at {snapshot_at}");
             Ok(())
         }
         AccountAction::Show { json } => {
@@ -1133,8 +1133,8 @@ fn handle_account(ledger: &Ledger, action: AccountAction) -> Result<()> {
             }
             Ok(())
         }
-        AccountAction::History { limit, json } => {
-            let snapshots = ledger.list_account_snapshots(limit)?;
+        AccountAction::History { limit: _, json } => {
+            let snapshots = ledger.list_account_snapshots()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&snapshots)?);
             } else if snapshots.is_empty() {
@@ -1146,19 +1146,7 @@ fn handle_account(ledger: &Ledger, action: AccountAction) -> Result<()> {
                 );
                 println!("{}", "-".repeat(110));
                 for snapshot in &snapshots {
-                    println!(
-                        "{:>5}  {:<25}  {:>14.2}  {:>14.2}  {:>18}  {:<8}  {}",
-                        snapshot.id,
-                        snapshot.snapshot_at,
-                        snapshot.trade_date_cash,
-                        snapshot.settled_cash,
-                        snapshot
-                            .option_buying_power
-                            .map(|v| format!("{v:.2}"))
-                            .unwrap_or_else(|| "-".to_string()),
-                        if snapshot.margin_enabled { "yes" } else { "no" },
-                        snapshot.notes,
-                    );
+                    render_account_snapshot(snapshot);
                 }
             }
             Ok(())
@@ -1197,28 +1185,25 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| today())
 }
 
-fn render_account_snapshot(snapshot: &AccountSnapshot) {
-    println!("Account snapshot #{}", snapshot.id);
-    println!("  at              : {}", snapshot.snapshot_at);
-    println!("  trade-date cash : ${:.2}", snapshot.trade_date_cash);
-    println!("  settled cash    : ${:.2}", snapshot.settled_cash);
+fn render_account_snapshot(s: &AccountSnapshot) {
     println!(
-        "  option bp       : {}",
-        snapshot
-            .option_buying_power
-            .map(|v| format!("${v:.2}"))
-            .unwrap_or_else(|| "-".to_string())
+        "{:>5}  {:<30}  {:>14.2}  {:>14.2}  {:>18.2}  {:<6}  {:<20}",
+        s.id,
+        s.snapshot_at,
+        s.trade_date_cash,
+        s.settled_cash,
+        s.option_buying_power.unwrap_or(0.0),
+        if s.margin_enabled { "yes" } else { "no" },
+        s.notes
     );
-    println!(
-        "  margin        : {}",
-        if snapshot.margin_enabled {
-            "enabled"
-        } else {
-            "cash-only"
-        }
-    );
-    if !snapshot.notes.is_empty() {
-        println!("  notes         : {}", snapshot.notes);
+    if s.stock_buying_power.is_some() || s.margin_loan.is_some() || s.short_market_value.is_some() {
+        println!(
+            "       {:<30}  Stock BP: {:>11.2}  Loan: {:>11.2}  Short: {:>11.2}",
+            "",
+            s.stock_buying_power.unwrap_or(0.0),
+            s.margin_loan.unwrap_or(0.0),
+            s.short_market_value.unwrap_or(0.0)
+        );
     }
 }
 
@@ -1237,6 +1222,9 @@ async fn handle_strategies(ledger: &Ledger, underlying: Option<String>, json: bo
         trade_date_cash: Some(account_snapshot.trade_date_cash),
         settled_cash: Some(account_snapshot.settled_cash),
         option_buying_power: account_snapshot.option_buying_power,
+        stock_buying_power: account_snapshot.stock_buying_power,
+        margin_loan: account_snapshot.margin_loan,
+        short_market_value: account_snapshot.short_market_value,
         margin_enabled: account_snapshot.margin_enabled,
     };
     let margin_positions: Vec<EnrichedPosition> = positions
@@ -1334,6 +1322,9 @@ async fn handle_report(
         trade_date_cash: Some(account_snapshot.trade_date_cash),
         settled_cash: Some(account_snapshot.settled_cash),
         option_buying_power: account_snapshot.option_buying_power,
+        stock_buying_power: account_snapshot.stock_buying_power,
+        margin_loan: account_snapshot.margin_loan,
+        short_market_value: account_snapshot.short_market_value,
         margin_enabled: account_snapshot.margin_enabled,
     };
 
@@ -1557,6 +1548,9 @@ fn record_auto_snapshot(
 
     let last_snapshot = ledger.latest_account_snapshot()?;
     let margin_enabled = last_snapshot.as_ref().map(|s| s.margin_enabled).unwrap_or(true);
+    let stock_buying_power = last_snapshot.as_ref().and_then(|s| s.stock_buying_power);
+    let margin_loan = last_snapshot.as_ref().and_then(|s| s.margin_loan);
+    let short_market_value = last_snapshot.as_ref().and_then(|s| s.short_market_value);
 
     let positions = ledger.calculate_positions(None)?;
     let strategies = risk_engine::identify_strategies(&positions);
@@ -1565,23 +1559,31 @@ fn record_auto_snapshot(
         trade_date_cash: Some(trade_cash),
         settled_cash: Some(settled_cash),
         option_buying_power: None,
+        stock_buying_power,
+        margin_loan,
+        short_market_value,
         margin_enabled,
     };
 
     let evaluated = margin_engine::evaluate_strategies(&strategies, enriched, &account_ctx);
     let total_margin: f64 = evaluated.iter().map(|s| s.margin.margin_required).sum();
-    let buying_power = trade_cash - total_margin;
+    let computed_buying_power = trade_cash - total_margin;
 
     let snapshot_at = now_rfc3339();
     ledger.record_account_snapshot(
         &snapshot_at,
         trade_cash,
         settled_cash,
-        Some(buying_power),
+        Some(computed_buying_power),
+        stock_buying_power,
+        margin_loan,
+        short_market_value,
         margin_enabled,
-        &format!("auto-update after trade on {trade_date}"),
+        &format!("auto-update after trade on {}", trade_date),
     )?;
-
-    println!("Auto-updated account snapshot: T-Cash=${trade_cash:.2}, S-Cash=${settled_cash:.2}, Buying Power=${buying_power:.2}");
+    println!(
+        "Auto-updated account snapshot: T-Cash=${:.2}, S-Cash=${:.2}, Buying Power=${:.2}",
+        trade_cash, settled_cash, computed_buying_power
+    );
     Ok(())
 }

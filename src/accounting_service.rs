@@ -75,12 +75,29 @@ impl<'a> AccountingService<'a> {
     /// Derive the current account balances (trade-date and settled) based on all historical trades
     /// and a starting base snapshot if provided.
     pub fn derive_balances(&self, as_of_date: &str) -> Result<(f64, f64)> {
-        let trades = self.ledger.list_trades(&TradeFilter::default())?;
+        // Use latest manual snapshot as a checkpoint if available
+        let checkpoint = self.ledger.latest_manual_snapshot()?;
         
-        let mut trade_date_total = 0.0;
-        let mut settled_total = 0.0;
+        let (mut trade_date_total, mut settled_total, start_date) = if let Some(cp) = checkpoint {
+            // We assume the checkpoint represents the state AT the end of cp.snapshot_at/trade_date
+            // But wait, snapshots have their own timestamp. Let's use the date from snapshot_at if it's "YYYY-MM-DD..."
+            let cp_date = &cp.snapshot_at[..10]; 
+            (cp.trade_date_cash, cp.settled_cash, Some(cp_date.to_string()))
+        } else {
+            (0.0, 0.0, None)
+        };
+
+        let filter = TradeFilter::default();
+        let trades = self.ledger.list_trades(&filter)?;
         
         for trade in trades {
+            // Only process trades strictly AFTER the checkpoint date (if any)
+            if let Some(ref start) = start_date {
+                if trade.trade_date <= *start {
+                    continue;
+                }
+            }
+
             let flow = Self::calculate_cash_flow(&trade);
             let settlement_date = self.get_settlement_date(&trade.trade_date)?;
             

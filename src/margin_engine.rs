@@ -7,6 +7,9 @@ pub struct AccountContext {
     pub trade_date_cash: Option<f64>,
     pub settled_cash: Option<f64>,
     pub option_buying_power: Option<f64>,
+    pub stock_buying_power: Option<f64>,
+    pub margin_loan: Option<f64>,
+    pub short_market_value: Option<f64>,
     pub margin_enabled: bool,
 }
 

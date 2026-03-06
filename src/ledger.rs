@@ -61,6 +61,9 @@ pub struct AccountSnapshot {
     pub trade_date_cash: f64,
     pub settled_cash: f64,
     pub option_buying_power: Option<f64>,
+    pub stock_buying_power: Option<f64>,
+    pub margin_loan: Option<f64>,
+    pub short_market_value: Option<f64>,
     pub margin_enabled: bool,
     pub notes: String,
 }
@@ -131,13 +134,16 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS idx_trades_date       ON trades(trade_date);
 
             CREATE TABLE IF NOT EXISTS account_snapshots (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                id                  INTEGER PRIMARY KEY,
                 snapshot_at         TEXT    NOT NULL,
                 trade_date_cash     REAL    NOT NULL,
                 settled_cash        REAL    NOT NULL,
                 option_buying_power REAL,
-                margin_enabled      INTEGER NOT NULL,
-                notes               TEXT    NOT NULL DEFAULT ''
+                stock_buying_power  REAL,
+                margin_loan         REAL,
+                short_market_value  REAL,
+                margin_enabled      BOOLEAN NOT NULL,
+                notes               TEXT    NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_account_snapshots_time
@@ -277,21 +283,43 @@ impl Ledger {
         trade_date_cash: f64,
         settled_cash: f64,
         option_buying_power: Option<f64>,
+        stock_buying_power: Option<f64>,
+        margin_loan: Option<f64>,
+        short_market_value: Option<f64>,
         margin_enabled: bool,
         notes: &str,
-    ) -> Result<i64> {
+    ) -> Result<()> {
         ensure!(trade_date_cash >= 0.0, "trade_date_cash must be non-negative");
         ensure!(settled_cash >= 0.0, "settled_cash must be non-negative");
         if let Some(obp) = option_buying_power {
             ensure!(obp >= 0.0, "option_buying_power must be non-negative");
         }
+        if let Some(sbp) = stock_buying_power {
+            ensure!(sbp >= 0.0, "stock_buying_power must be non-negative");
+        }
+        if let Some(ml) = margin_loan {
+            ensure!(ml >= 0.0, "margin_loan must be non-negative");
+        }
+        if let Some(smv) = short_market_value {
+            ensure!(smv >= 0.0, "short_market_value must be non-negative");
+        }
 
         self.conn.execute(
-            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes],
+            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                snapshot_at,
+                trade_date_cash,
+                settled_cash,
+                option_buying_power,
+                stock_buying_power,
+                margin_loan,
+                short_market_value,
+                margin_enabled,
+                notes,
+            ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -470,26 +498,71 @@ impl Ledger {
     }
 
     pub fn latest_account_snapshot(&self) -> Result<Option<AccountSnapshot>> {
-        let mut snapshots = self.list_account_snapshots(1)?;
-        Ok(snapshots.pop())
-    }
-
-    pub fn list_account_snapshots(&self, limit: usize) -> Result<Vec<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, margin_enabled, notes
-             FROM account_snapshots
-             ORDER BY snapshot_at DESC, id DESC
-             LIMIT ?1",
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
+             FROM account_snapshots ORDER BY snapshot_at DESC, id DESC LIMIT 1",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let mut rows = stmt.query_map([], |row| {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
                 trade_date_cash: row.get(2)?,
                 settled_cash: row.get(3)?,
                 option_buying_power: row.get(4)?,
-                margin_enabled: row.get(5)?,
-                notes: row.get(6)?,
+                stock_buying_power: row.get(5)?,
+                margin_loan: row.get(6)?,
+                short_market_value: row.get(7)?,
+                margin_enabled: row.get(8)?,
+                notes: row.get(9)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Returns the latest snapshot that was NOT an automatic update.
+    /// This is used as a checkpoint/baseline for balance derivation.
+    pub fn latest_manual_snapshot(&self) -> Result<Option<AccountSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
+             FROM account_snapshots 
+             WHERE notes NOT LIKE 'auto-update%'
+             ORDER BY snapshot_at DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(AccountSnapshot {
+                id: row.get(0)?,
+                snapshot_at: row.get(1)?,
+                trade_date_cash: row.get(2)?,
+                settled_cash: row.get(3)?,
+                option_buying_power: row.get(4)?,
+                stock_buying_power: row.get(5)?,
+                margin_loan: row.get(6)?,
+                short_market_value: row.get(7)?,
+                margin_enabled: row.get(8)?,
+                notes: row.get(9)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn list_account_snapshots(&self) -> Result<Vec<AccountSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
+             FROM account_snapshots
+             ORDER BY snapshot_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AccountSnapshot {
+                id: row.get(0)?,
+                snapshot_at: row.get(1)?,
+                trade_date_cash: row.get(2)?,
+                settled_cash: row.get(3)?,
+                option_buying_power: row.get(4)?,
+                stock_buying_power: row.get(5)?,
+                margin_loan: row.get(6)?,
+                short_market_value: row.get(7)?,
+                margin_enabled: row.get(8)?,
+                notes: row.get(9)?,
             })
         })?;
 

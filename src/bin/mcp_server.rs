@@ -433,6 +433,9 @@ impl ServerHandler for ThetaHandler {
                         trade_date_cash: 100000.0,
                         settled_cash: 100000.0,
                         option_buying_power: None,
+                        stock_buying_power: None,
+                        margin_loan: None,
+                        short_market_value: None,
                         margin_enabled: true,
                         notes: "dummy snapshot".to_string()
                     }
@@ -442,6 +445,9 @@ impl ServerHandler for ThetaHandler {
                     trade_date_cash: Some(account_snapshot.trade_date_cash),
                     settled_cash: Some(account_snapshot.settled_cash),
                     option_buying_power: account_snapshot.option_buying_power,
+                    stock_buying_power: account_snapshot.stock_buying_power,
+                    margin_loan: account_snapshot.margin_loan,
+                    short_market_value: account_snapshot.short_market_value,
                     margin_enabled: account_snapshot.margin_enabled,
                 };
                 
