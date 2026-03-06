@@ -301,7 +301,7 @@ impl Ledger {
         margin_enabled: bool,
         notes: &str,
         account_id: &str,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -316,9 +316,9 @@ impl Ledger {
                 margin_enabled,
                 notes,
                 account_id,
-            ],
+             ],
         )?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
     }
 
     // -----------------------------------------------------------------------
@@ -461,9 +461,23 @@ impl Ledger {
             }
         }
 
+        let today = time::OffsetDateTime::now_utc().date().to_string();
+
         let mut positions: Vec<Position> = accum
             .into_iter()
-            .filter(|(_, v)| v.net_quantity != 0)
+            .filter(|(k, v)| {
+                // filter quantity
+                if v.net_quantity == 0 {
+                    return false;
+                }
+                // filter expiry (if present and in the past)
+                if let Some(ref exp) = k.expiry {
+                    if exp < &today {
+                        return false;
+                    }
+                }
+                true
+            })
             .map(|(k, v)| {
                 let avg_cost = if v.net_quantity != 0 {
                     v.open_cost_total / v.net_quantity.unsigned_abs() as f64
@@ -646,6 +660,7 @@ mod tests {
                 5.30,
                 0.0,
                 "opening short call",
+                "firstrade"
             )
             .unwrap();
         assert_eq!(id, 1);
@@ -662,14 +677,14 @@ mod tests {
 
         // Buy 200 shares of TSLA
         ledger
-            .record_trade("2026-01-15", "TSLA", "TSLA", "stock", None, None, "buy", 200, 350.0, 0.0, "")
+            .record_trade("2026-01-15", "TSLA", "TSLA", "stock", None, None, "buy", 200, 350.0, 0.0, "", "firstrade")
             .unwrap();
 
         // Sell 2 call contracts (short)
         ledger
             .record_trade(
                 "2026-02-01", "TSLA260320C00400000", "TSLA", "call",
-                Some(400.0), Some("2026-03-20"), "sell", 2, 5.30, 0.0, "",
+                Some(400.0), Some("2026-03-20"), "sell", 2, 5.30, 0.0, "", "firstrade"
             )
             .unwrap();
 
@@ -677,11 +692,11 @@ mod tests {
         ledger
             .record_trade(
                 "2026-02-15", "TSLA260320C00400000", "TSLA", "call",
-                Some(400.0), Some("2026-03-20"), "buy", 1, 3.20, 0.0, "",
+                Some(400.0), Some("2026-03-20"), "buy", 1, 3.20, 0.0, "", "firstrade"
             )
             .unwrap();
 
-        let positions = ledger.calculate_positions(None).unwrap();
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
         assert_eq!(positions.len(), 2);
 
         let stock = positions.iter().find(|p| p.side == "stock").unwrap();
@@ -698,7 +713,7 @@ mod tests {
     fn delete_trade() {
         let ledger = in_memory_ledger();
         let id = ledger
-            .record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "")
+            .record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "", "firstrade")
             .unwrap();
 
         assert!(ledger.delete_trade(id).unwrap());
@@ -711,8 +726,8 @@ mod tests {
     #[test]
     fn filter_by_underlying() {
         let ledger = in_memory_ledger();
-        ledger.record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "").unwrap();
-        ledger.record_trade("2026-03-01", "AAPL", "AAPL", "stock", None, None, "buy", 50, 175.0, 0.0, "").unwrap();
+        ledger.record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "", "firstrade").unwrap();
+        ledger.record_trade("2026-03-01", "AAPL", "AAPL", "stock", None, None, "buy", 50, 175.0, 0.0, "", "firstrade").unwrap();
 
         let filter = TradeFilter { underlying: Some("TSLA".into()), ..Default::default() };
         let trades = ledger.list_trades(&filter).unwrap();
@@ -723,10 +738,10 @@ mod tests {
     #[test]
     fn closed_position_not_in_results() {
         let ledger = in_memory_ledger();
-        ledger.record_trade("2026-01-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 350.0, 0.0, "").unwrap();
-        ledger.record_trade("2026-02-01", "TSLA", "TSLA", "stock", None, None, "sell", 100, 400.0, 0.0, "").unwrap();
+        ledger.record_trade("2026-01-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 350.0, 0.0, "", "firstrade").unwrap();
+        ledger.record_trade("2026-02-01", "TSLA", "TSLA", "stock", None, None, "sell", 100, 400.0, 0.0, "", "firstrade").unwrap();
 
-        let positions = ledger.calculate_positions(None).unwrap();
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
         assert!(positions.is_empty());
     }
 
@@ -746,10 +761,11 @@ mod tests {
                 5.00,
                 0.0,
                 "",
+                "firstrade"
             )
             .unwrap();
 
-        let positions = ledger.calculate_positions(None).unwrap();
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
         let put = positions.iter().find(|p| p.side == "put").unwrap();
         assert_eq!(put.net_quantity, -1);
         assert!((put.avg_cost - 5.00).abs() < 0.001);
@@ -772,14 +788,39 @@ mod tests {
                 10.0,
                 5.0,
                 "",
+                "firstrade"
             )
             .unwrap();
 
-        let positions = ledger.calculate_positions(None).unwrap();
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
         let stock = positions.iter().find(|p| p.side == "stock").unwrap();
         assert_eq!(stock.net_quantity, 100);
         assert!((stock.avg_cost - 10.05).abs() < 0.001);
         assert!((stock.total_cost - 1005.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn expired_contract_is_filtered() {
+        let ledger = in_memory_ledger();
+        // Record a trade with an old expiry (e.g., 2026-02-20)
+        ledger.record_trade(
+            "2026-02-20",
+            "TSLA260220P390000",
+            "TSLA",
+            "put",
+            Some(390.0),
+            Some("2026-02-20"),
+            "sell",
+            1,
+            0.01,
+            0.0,
+            "expired short put",
+            "firstrade"
+        ).unwrap();
+
+        // Calculate positions - assuming today is after 2026-02-20
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
+        assert!(positions.is_empty(), "Expired contract should be filtered out");
     }
 
     #[test]
@@ -791,13 +832,17 @@ mod tests {
                 50_000.0,
                 50_000.0,
                 Some(120_000.0),
+                None,
+                None,
+                None,
                 true,
                 "initial snapshot",
+                "firstrade"
             )
             .unwrap();
         assert_eq!(id, 1);
 
-        let latest = ledger.latest_account_snapshot().unwrap().expect("snapshot");
+        let latest = ledger.latest_account_snapshot("firstrade").unwrap().expect("snapshot");
         assert_eq!(latest.trade_date_cash, 50_000.0);
         assert_eq!(latest.settled_cash, 50_000.0);
         assert_eq!(latest.option_buying_power, Some(120_000.0));
@@ -821,6 +866,7 @@ mod tests {
                 5.0,
                 0.0,
                 "",
+                "firstrade"
             )
             .unwrap();
         ledger
@@ -836,10 +882,11 @@ mod tests {
                 0.0,
                 0.0,
                 "expired",
+                "firstrade"
             )
             .unwrap();
 
-        let positions = ledger.calculate_positions(None).unwrap();
+        let positions = ledger.calculate_positions("firstrade", None).unwrap();
         assert!(positions.is_empty());
     }
 }

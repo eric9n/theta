@@ -349,6 +349,9 @@ mod tests {
                 trade_date_cash: Some(40_000.0),
                 settled_cash: Some(40_000.0),
                 option_buying_power: None,
+                stock_buying_power: None,
+                margin_loan: None,
+                short_market_value: None,
                 margin_enabled: true,
             },
         );
