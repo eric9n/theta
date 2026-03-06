@@ -423,20 +423,16 @@ impl ServerHandler for ThetaHandler {
                 // Determine ledger db path based on account arg
                 let account_name = args.account.as_deref().unwrap_or("firstrade").to_lowercase();
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                let ledger_db_path = if account_name == "longbridge" {
-                    std::path::PathBuf::from(&home).join(".theta").join("longbridge.db")
-                } else {
-                    std::path::PathBuf::from(&home).join(".theta").join("portfolio.db")
-                };
+                let ledger_db_path = std::path::PathBuf::from(&home).join(".theta").join("portfolio.db");
 
                 let ledger = Ledger::open(&ledger_db_path).map_err(|e| CallToolError::from_message(format!("Failed to open ledger at {:?}: {}", ledger_db_path, e)))?; 
                 
-                let positions: Vec<Position> = match ledger.calculate_positions(None) {
+                let positions: Vec<Position> = match ledger.calculate_positions(&account_name, None) {
                     Ok(p) => p,
                     Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error loading positions: {}", e).into()])),
                 };
                 
-                let account_snapshot = match ledger.latest_account_snapshot() {
+                let account_snapshot = match ledger.latest_account_snapshot(&account_name) {
                     Ok(Some(a)) => a,
                     _ => AccountSnapshot {
                         id: 0,
@@ -448,7 +444,8 @@ impl ServerHandler for ThetaHandler {
                         margin_loan: None,
                         short_market_value: None,
                         margin_enabled: true,
-                        notes: "dummy snapshot".to_string()
+                        notes: "dummy snapshot".to_string(),
+                        account_id: account_name,
                     }
                 };
                 

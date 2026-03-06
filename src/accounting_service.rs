@@ -74,9 +74,9 @@ impl<'a> AccountingService<'a> {
 
     /// Derive the current account balances (trade-date and settled) based on all historical trades
     /// and a starting base snapshot if provided.
-    pub fn derive_balances(&self, as_of_date: &str) -> Result<(f64, f64)> {
+    pub fn derive_balances(&self, account_id: &str, as_of_date: &str) -> Result<(f64, f64)> {
         // Use latest manual snapshot as a checkpoint if available
-        let checkpoint = self.ledger.latest_manual_snapshot()?;
+        let checkpoint = self.ledger.latest_manual_snapshot(account_id)?;
         
         let (mut trade_date_total, mut settled_total, start_date) = if let Some(cp) = checkpoint {
             // We assume the checkpoint represents the state AT the end of cp.snapshot_at/trade_date
@@ -87,7 +87,10 @@ impl<'a> AccountingService<'a> {
             (0.0, 0.0, None)
         };
 
-        let filter = TradeFilter::default();
+        let filter = TradeFilter {
+            account_id: Some(account_id.to_string()),
+            ..Default::default()
+        };
         let trades = self.ledger.list_trades(&filter)?;
         
         for trade in trades {

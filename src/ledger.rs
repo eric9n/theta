@@ -29,8 +29,8 @@ pub struct Trade {
     pub price: f64,
     /// Commission / fees
     pub commission: f64,
-    /// Free-form notes
     pub notes: String,
+    pub account_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,7 @@ pub struct AccountSnapshot {
     pub short_market_value: Option<f64>,
     pub margin_enabled: bool,
     pub notes: String,
+    pub account_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,9 +75,10 @@ pub struct AccountSnapshot {
 
 #[derive(Debug, Default)]
 pub struct TradeFilter {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
     pub underlying: Option<String>,
-    pub from_date: Option<String>,
-    pub to_date: Option<String>,
+    pub account_id: Option<String>,
     pub symbol: Option<String>,
 }
 
@@ -126,12 +128,14 @@ impl Ledger {
                 quantity    INTEGER NOT NULL,
                 price       REAL    NOT NULL,
                 commission  REAL    NOT NULL DEFAULT 0,
-                notes       TEXT    NOT NULL DEFAULT ''
+                notes       TEXT    NOT NULL DEFAULT '',
+                account_id  TEXT    NOT NULL DEFAULT 'firstrade'
             );
 
             CREATE INDEX IF NOT EXISTS idx_trades_underlying ON trades(underlying);
             CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol);
             CREATE INDEX IF NOT EXISTS idx_trades_date       ON trades(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_account    ON trades(account_id);
 
             CREATE TABLE IF NOT EXISTS account_snapshots (
                 id                  INTEGER PRIMARY KEY,
@@ -143,11 +147,14 @@ impl Ledger {
                 margin_loan         REAL,
                 short_market_value  REAL,
                 margin_enabled      BOOLEAN NOT NULL,
-                notes               TEXT    NOT NULL
+                notes               TEXT    NOT NULL,
+                account_id          TEXT    NOT NULL DEFAULT 'firstrade'
             );
 
             CREATE INDEX IF NOT EXISTS idx_account_snapshots_time
-                ON account_snapshots(snapshot_at);",
+                ON account_snapshots(snapshot_at);
+            CREATE INDEX IF NOT EXISTS idx_account_snapshots_account
+                ON account_snapshots(account_id);",
         )?;
         Ok(())
     }
@@ -188,6 +195,7 @@ impl Ledger {
         price: f64,
         commission: f64,
         notes: &str,
+        account_id: &str,
     ) -> Result<i64> {
         self.record_trade_internal(
             trade_date,
@@ -201,6 +209,7 @@ impl Ledger {
             price,
             commission,
             notes,
+            account_id,
             false,
         )
     }
@@ -218,6 +227,7 @@ impl Ledger {
         price: f64,
         commission: f64,
         notes: &str,
+        account_id: &str,
     ) -> Result<i64> {
         self.record_trade_internal(
             trade_date,
@@ -231,6 +241,7 @@ impl Ledger {
             price,
             commission,
             notes,
+            account_id,
             true,
         )
     }
@@ -248,6 +259,7 @@ impl Ledger {
         price: f64,
         commission: f64,
         notes: &str,
+        account_id: &str,
         allow_zero_price: bool,
     ) -> Result<i64> {
         ensure!(matches!(side, "call" | "put" | "stock"), "invalid side: {side}");
@@ -261,9 +273,9 @@ impl Ledger {
         ensure!(commission >= 0.0, "commission must be non-negative");
 
         self.conn.execute(
-            "INSERT INTO trades (trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes],
+            "INSERT INTO trades (trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -288,10 +300,11 @@ impl Ledger {
         short_market_value: Option<f64>,
         margin_enabled: bool,
         notes: &str,
+        account_id: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 snapshot_at,
                 trade_date_cash,
@@ -302,6 +315,7 @@ impl Ledger {
                 short_market_value,
                 margin_enabled,
                 notes,
+                account_id,
             ],
         )?;
         Ok(())
@@ -313,7 +327,7 @@ impl Ledger {
 
     /// List trades with optional filters.
     pub fn list_trades(&self, filter: &TradeFilter) -> Result<Vec<Trade>> {
-        let mut sql = String::from("SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes FROM trades WHERE 1=1");
+        let mut sql = String::from("SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id FROM trades WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(ref underlying) = filter.underlying {
@@ -324,13 +338,17 @@ impl Ledger {
             sql.push_str(" AND symbol = ?");
             param_values.push(Box::new(sym.clone()));
         }
-        if let Some(ref from) = filter.from_date {
+        if let Some(ref start_date) = filter.start_date {
             sql.push_str(" AND trade_date >= ?");
-            param_values.push(Box::new(from.clone()));
+            param_values.push(Box::new(start_date.clone()));
         }
-        if let Some(ref to) = filter.to_date {
+        if let Some(ref end_date) = filter.end_date {
             sql.push_str(" AND trade_date <= ?");
-            param_values.push(Box::new(to.clone()));
+            param_values.push(Box::new(end_date.clone()));
+        }
+        if let Some(ref account_id) = filter.account_id {
+            sql.push_str(" AND account_id = ?");
+            param_values.push(Box::new(account_id.clone()));
         }
 
         sql.push_str(" ORDER BY trade_date ASC, id ASC");
@@ -352,6 +370,7 @@ impl Ledger {
                 price: row.get(9)?,
                 commission: row.get(10)?,
                 notes: row.get(11)?,
+                account_id: row.get(12)?,
             })
         })?;
 
@@ -364,9 +383,10 @@ impl Ledger {
 
     /// Compute current positions by aggregating all trades.
     /// Buy adds to position, sell subtracts. Returns only non-zero positions.
-    pub fn calculate_positions(&self, underlying_filter: Option<&str>) -> Result<Vec<Position>> {
+    pub fn calculate_positions(&self, account_id: &str, underlying_filter: Option<&str>) -> Result<Vec<Position>> {
         let trades = self.list_trades(&TradeFilter {
             underlying: underlying_filter.map(String::from),
+            account_id: Some(account_id.to_string()),
             ..Default::default()
         })?;
 
@@ -482,12 +502,14 @@ impl Ledger {
         Ok(positions)
     }
 
-    pub fn latest_account_snapshot(&self) -> Result<Option<AccountSnapshot>> {
+    pub fn latest_account_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
-             FROM account_snapshots ORDER BY snapshot_at DESC, id DESC LIMIT 1",
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+             FROM account_snapshots 
+             WHERE account_id = ?
+             ORDER BY snapshot_at DESC, id DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map([], |row| {
+        let mut rows = stmt.query_map(params![account_id], |row| {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
@@ -499,6 +521,7 @@ impl Ledger {
                 short_market_value: row.get(7)?,
                 margin_enabled: row.get(8)?,
                 notes: row.get(9)?,
+                account_id: row.get(10)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -506,14 +529,14 @@ impl Ledger {
 
     /// Returns the latest snapshot that was NOT an automatic update.
     /// This is used as a checkpoint/baseline for balance derivation.
-    pub fn latest_manual_snapshot(&self) -> Result<Option<AccountSnapshot>> {
+    pub fn latest_manual_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots 
-             WHERE notes NOT LIKE 'auto-update%'
+             WHERE notes NOT LIKE 'auto-update%' AND account_id = ?
              ORDER BY snapshot_at DESC, id DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map([], |row| {
+        let mut rows = stmt.query_map(params![account_id], |row| {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
@@ -525,18 +548,20 @@ impl Ledger {
                 short_market_value: row.get(7)?,
                 margin_enabled: row.get(8)?,
                 notes: row.get(9)?,
+                account_id: row.get(10)?,
             })
         })?;
         Ok(rows.next().transpose()?)
     }
 
-    pub fn list_account_snapshots(&self) -> Result<Vec<AccountSnapshot>> {
+    pub fn list_account_snapshots(&self, account_id: &str) -> Result<Vec<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes
+            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots
+             WHERE account_id = ?
              ORDER BY snapshot_at DESC, id DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![account_id], |row| {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
@@ -548,6 +573,7 @@ impl Ledger {
                 short_market_value: row.get(7)?,
                 margin_enabled: row.get(8)?,
                 notes: row.get(9)?,
+                account_id: row.get(10)?,
             })
         })?;
 
