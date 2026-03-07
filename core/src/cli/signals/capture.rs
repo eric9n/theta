@@ -1,6 +1,6 @@
 use crate::signal_service::{MarketToneRequest, ThetaSignalService};
 use crate::snapshot_store::SignalSnapshotStore;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::Args;
 use std::path::PathBuf;
 use time::{
@@ -114,27 +114,44 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         for symbol in &symbols {
-            let front_expiry = service.front_expiry_for_symbol(symbol).await?;
-            let view = service
-                .market_tone(MarketToneRequest {
-                    symbol: symbol.clone(),
-                    expiry: front_expiry,
-                    expiries_limit: cli.expiries_limit,
-                    rate: cli.rate,
-                    dividend: cli.dividend,
-                    iv: cli.iv,
-                    iv_from_market_price: cli.iv_from_market_price,
-                    target_delta: cli.target_delta,
-                    target_otm_percent: cli.target_otm_percent,
-                    smile_target_otm_percents: smile_targets.clone(),
-                    bias_min_otm_percent: cli.bias_min_otm_percent,
-                })
-                .await?;
-            store.record_market_tone(&captured_at, &view)?;
-            println!(
-                "{} {} {} {}",
-                captured_at, view.underlying_symbol, view.front_expiry, view.summary.overall_tone
-            );
+            let capture = async {
+                let front_expiry = service.front_expiry_for_symbol(symbol).await?;
+                let view = service
+                    .market_tone(MarketToneRequest {
+                        symbol: symbol.clone(),
+                        expiry: front_expiry,
+                        expiries_limit: cli.expiries_limit,
+                        rate: cli.rate,
+                        dividend: cli.dividend,
+                        iv: cli.iv,
+                        iv_from_market_price: cli.iv_from_market_price,
+                        target_delta: cli.target_delta,
+                        target_otm_percent: cli.target_otm_percent,
+                        smile_target_otm_percents: smile_targets.clone(),
+                        bias_min_otm_percent: cli.bias_min_otm_percent,
+                    })
+                    .await?;
+                store.record_market_tone(&captured_at, &view)?;
+                println!(
+                    "{} {} {} {}",
+                    captured_at,
+                    view.underlying_symbol,
+                    view.front_expiry,
+                    view.summary.overall_tone
+                );
+                Ok::<(), Error>(())
+            }
+            .await;
+
+            if let Err(err) = capture {
+                if cli.r#loop && is_transient_quote_limit_error(&err) {
+                    eprintln!(
+                        "{captured_at} transient quote rate limit while capturing {symbol}: {err}"
+                    );
+                    break;
+                }
+                return Err(err);
+            }
         }
 
         if !cli.r#loop {
@@ -146,6 +163,14 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_transient_quote_limit_error(err: &Error) -> bool {
+    let text = err.to_string();
+    text.contains("301606")
+        || text.contains("301607")
+        || text.contains("Request rate limit")
+        || text.contains("Too many option securities request within one minute")
 }
 
 fn is_us_regular_market_hours(now_utc: OffsetDateTime) -> bool {
@@ -200,4 +225,27 @@ fn nth_weekday_of_month(year: i32, month: Month, weekday: Weekday, nth: u8) -> u
         }
     }
     panic!("failed to resolve weekday occurrence for {month:?} {year}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient_quote_limit_error;
+    use anyhow::anyhow;
+
+    #[test]
+    fn detects_transient_quote_rate_limit_errors() {
+        assert!(is_transient_quote_limit_error(&anyhow!(
+            "SDK Proxy Error [option_quote]: response error: 7: detail:Some(WsResponseErrorDetail {{ code: 301607, msg: \"Too many option securities request within one minute\" }})"
+        )));
+        assert!(is_transient_quote_limit_error(&anyhow!(
+            "SDK Proxy Error [option_quote]: response error: 301606 Request rate limit"
+        )));
+    }
+
+    #[test]
+    fn ignores_non_rate_limit_errors() {
+        assert!(!is_transient_quote_limit_error(&anyhow!(
+            "target_price is outside solvable range for current model assumptions"
+        )));
+    }
 }
