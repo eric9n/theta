@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time::Date;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 const STOCK_QUOTE_TTL: Duration = Duration::from_secs(5);
 const OPTION_QUOTE_TTL: Duration = Duration::from_secs(8);
@@ -377,7 +377,7 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
             .count()
             .saturating_sub(misses.len().saturating_sub(unresolved));
 
-        info!(
+        debug!(
             method = method,
             requested_count = requested_keys.len(),
             unique_requested_count = unique_keys.len(),
@@ -456,7 +456,7 @@ fn log_single_cache_event(
     backend_called: bool,
     ttl: Duration,
 ) {
-    info!(
+    debug!(
         method = method,
         requested_count = requested_count,
         unique_requested_count = requested_count,
