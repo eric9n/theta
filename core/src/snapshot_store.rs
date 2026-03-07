@@ -280,7 +280,9 @@ impl SignalSnapshotStore {
     }
 
     pub fn list_symbols(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT symbol FROM market_tone_snapshots ORDER BY symbol ASC")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT symbol FROM market_tone_snapshots ORDER BY symbol ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         let mut symbols = Vec::new();
         for row in rows {
@@ -449,7 +451,8 @@ fn compute_front_atm_iv_rank_from_samples(
     symbol: &str,
     samples: &[(String, String, f64)],
 ) -> Option<FrontAtmIvRankRow> {
-    let (current_captured_at, current_front_expiry, current_front_atm_iv) = samples.first()?.clone();
+    let (current_captured_at, current_front_expiry, current_front_atm_iv) =
+        samples.first()?.clone();
     let min_front_atm_iv = samples
         .iter()
         .map(|(_, _, value)| *value)
@@ -486,8 +489,14 @@ fn compute_market_extreme_from_samples(
         sample_count: samples.len(),
         current_captured_at: current.captured_at.clone(),
         current_front_expiry: current.front_expiry.clone(),
-        delta_skew: compute_metric_stat(current.delta_skew, samples.iter().filter_map(|sample| sample.delta_skew)),
-        otm_skew: compute_metric_stat(current.otm_skew, samples.iter().filter_map(|sample| sample.otm_skew)),
+        delta_skew: compute_metric_stat(
+            current.delta_skew,
+            samples.iter().filter_map(|sample| sample.delta_skew),
+        ),
+        otm_skew: compute_metric_stat(
+            current.otm_skew,
+            samples.iter().filter_map(|sample| sample.otm_skew),
+        ),
         front_atm_iv: compute_required_metric_stat(
             current.front_atm_iv,
             samples.iter().map(|sample| sample.front_atm_iv),
@@ -500,7 +509,9 @@ fn compute_market_extreme_from_samples(
         ),
         open_interest_bias_ratio: compute_metric_stat(
             current.open_interest_bias_ratio,
-            samples.iter().filter_map(|sample| sample.open_interest_bias_ratio),
+            samples
+                .iter()
+                .filter_map(|sample| sample.open_interest_bias_ratio),
         ),
         otm_open_interest_bias_ratio: compute_metric_stat(
             current.otm_open_interest_bias_ratio,
@@ -551,7 +562,9 @@ fn compute_required_metric_stat(
 }
 
 fn find_smile_point(points: &[SmilePoint], target: f64) -> Option<&SmilePoint> {
-    points.iter().find(|point| (point.target_otm_percent - target).abs() < 1.0e-9)
+    points
+        .iter()
+        .find(|point| (point.target_otm_percent - target).abs() < 1.0e-9)
 }
 
 fn default_db_path() -> Result<PathBuf> {
@@ -562,7 +575,8 @@ fn default_db_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MarketExtremeSample, compute_front_atm_iv_rank_from_samples, compute_market_extreme_from_samples,
+        MarketExtremeSample, compute_front_atm_iv_rank_from_samples,
+        compute_market_extreme_from_samples,
     };
 
     #[test]
@@ -570,9 +584,21 @@ mod tests {
         let row = compute_front_atm_iv_rank_from_samples(
             "TSLA.US",
             &[
-                ("2026-03-02T10:00:00Z".to_string(), "2026-03-20".to_string(), 0.72),
-                ("2026-03-02T09:55:00Z".to_string(), "2026-03-20".to_string(), 0.60),
-                ("2026-03-02T09:50:00Z".to_string(), "2026-03-20".to_string(), 0.80),
+                (
+                    "2026-03-02T10:00:00Z".to_string(),
+                    "2026-03-20".to_string(),
+                    0.72,
+                ),
+                (
+                    "2026-03-02T09:55:00Z".to_string(),
+                    "2026-03-20".to_string(),
+                    0.60,
+                ),
+                (
+                    "2026-03-02T09:50:00Z".to_string(),
+                    "2026-03-20".to_string(),
+                    0.80,
+                ),
             ],
         )
         .expect("expected rank row");
@@ -632,6 +658,12 @@ mod tests {
         assert!((row.front_atm_iv.current - 0.70).abs() < 1.0e-12);
         assert!((row.front_atm_iv.mean - 0.66).abs() < 1.0e-12);
         assert!(row.front_atm_iv.z_score.expect("z-score should exist") > 0.0);
-        assert!(row.delta_skew.expect("delta skew stats should exist").z_score.expect("z-score should exist") > 0.0);
+        assert!(
+            row.delta_skew
+                .expect("delta skew stats should exist")
+                .z_score
+                .expect("z-score should exist")
+                > 0.0
+        );
     }
 }

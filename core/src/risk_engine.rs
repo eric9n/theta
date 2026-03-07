@@ -146,8 +146,7 @@ fn identify_iron_condors(
                     let put_width = (sp.strike.unwrap_or(0.0) - lp.strike.unwrap_or(0.0)).abs();
                     let gross_call_spread_risk = call_width * qty as f64 * 100.0;
                     let gross_put_spread_risk = put_width * qty as f64 * 100.0;
-                    let total_credit =
-                        spread_credit_total(sc, lc) + spread_credit_total(sp, lp);
+                    let total_credit = spread_credit_total(sc, lc) + spread_credit_total(sp, lp);
                     let max_side_risk = gross_call_spread_risk.max(gross_put_spread_risk);
                     let margin = (max_side_risk - total_credit).max(0.0);
 
@@ -282,7 +281,7 @@ fn identify_vertical_spreads(
         let indices: Vec<usize> = legs
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.side == *side_str && !consumed.contains(&p.symbol.as_str().len()))
+            .filter(|(i, p)| p.side == *side_str && !consumed.contains(i))
             .map(|(i, _)| i)
             .collect();
 
@@ -387,7 +386,9 @@ fn identify_covered_calls(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
-    let stock_idx = legs.iter().position(|p| p.side == "stock" && p.net_quantity > 0);
+    let stock_idx = legs
+        .iter()
+        .position(|p| p.side == "stock" && p.net_quantity > 0);
     if stock_idx.is_none() {
         return;
     }
@@ -635,12 +636,7 @@ fn identify_unmatched_stock(
 
 /// Calculate naked put margin: Firstrade formula
 /// max(20% × spot × qty × 100 − OTM + premium, 10% × spot × qty × 100 + premium)
-pub fn naked_put_margin(
-    spot: f64,
-    strike: f64,
-    quantity: u64,
-    premium_per_contract: f64,
-) -> f64 {
+pub fn naked_put_margin(spot: f64, strike: f64, quantity: u64, premium_per_contract: f64) -> f64 {
     let qty = quantity as f64;
     let multiplier = qty * 100.0;
     let premium_total = premium_per_contract * multiplier;
@@ -657,12 +653,7 @@ pub fn naked_put_margin(
 }
 
 /// Calculate naked call margin using the call-side mirror of the naked put formula.
-pub fn naked_call_margin(
-    spot: f64,
-    strike: f64,
-    quantity: u64,
-    premium_per_contract: f64,
-) -> f64 {
+pub fn naked_call_margin(spot: f64, strike: f64, quantity: u64, premium_per_contract: f64) -> f64 {
     let qty = quantity as f64;
     let multiplier = qty * 100.0;
     let premium_total = premium_per_contract * multiplier;
@@ -686,6 +677,11 @@ pub fn aggregate_greeks(positions: &[EnrichedPosition]) -> PortfolioGreeks {
     let mut greeks = PortfolioGreeks::default();
 
     for p in positions {
+        if p.side == "stock" {
+            greeks.net_delta_shares += p.net_quantity as f64;
+            continue;
+        }
+
         if let Some(ref g) = p.greeks {
             let sign = p.net_quantity.signum() as f64;
             let qty = p.net_quantity.unsigned_abs() as f64;
@@ -787,7 +783,15 @@ mod tests {
     fn identifies_covered_call() {
         let positions = vec![
             stock_pos("TSLA", 200, 350.0),
-            option_pos("TSLA260320C00400000", "TSLA", "call", 400.0, "2026-03-20", -2, 5.30),
+            option_pos(
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                400.0,
+                "2026-03-20",
+                -2,
+                5.30,
+            ),
         ];
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
@@ -798,8 +802,24 @@ mod tests {
     #[test]
     fn identifies_bull_put_spread() {
         let positions = vec![
-            option_pos("TSLA260320P00350000", "TSLA", "put", 350.0, "2026-03-20", -1, 8.0),
-            option_pos("TSLA260320P00340000", "TSLA", "put", 340.0, "2026-03-20", 1, 5.0),
+            option_pos(
+                "TSLA260320P00350000",
+                "TSLA",
+                "put",
+                350.0,
+                "2026-03-20",
+                -1,
+                8.0,
+            ),
+            option_pos(
+                "TSLA260320P00340000",
+                "TSLA",
+                "put",
+                340.0,
+                "2026-03-20",
+                1,
+                5.0,
+            ),
         ];
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
@@ -811,8 +831,24 @@ mod tests {
     #[test]
     fn identifies_bear_call_spread() {
         let positions = vec![
-            option_pos("TSLA260320C00400000", "TSLA", "call", 400.0, "2026-03-20", -1, 5.0),
-            option_pos("TSLA260320C00410000", "TSLA", "call", 410.0, "2026-03-20", 1, 2.0),
+            option_pos(
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                400.0,
+                "2026-03-20",
+                -1,
+                5.0,
+            ),
+            option_pos(
+                "TSLA260320C00410000",
+                "TSLA",
+                "call",
+                410.0,
+                "2026-03-20",
+                1,
+                2.0,
+            ),
         ];
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
@@ -862,9 +898,15 @@ mod tests {
 
     #[test]
     fn identifies_naked_put_when_cash_is_not_verified() {
-        let positions = vec![
-            option_pos("TSLA_P350", "TSLA", "put", 350.0, "2026-03-20", -2, 5.0),
-        ];
+        let positions = vec![option_pos(
+            "TSLA_P350",
+            "TSLA",
+            "put",
+            350.0,
+            "2026-03-20",
+            -2,
+            5.0,
+        )];
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::NakedPut);
@@ -901,7 +943,9 @@ mod tests {
         let strategies = identify_strategies(&positions);
         assert_eq!(strategies.len(), 2);
 
-        let covered = strategies.iter().find(|s| s.kind == StrategyKind::CoveredCall);
+        let covered = strategies
+            .iter()
+            .find(|s| s.kind == StrategyKind::CoveredCall);
         assert!(covered.is_some());
 
         let long_put = strategies.iter().find(|s| s.kind == StrategyKind::LongPut);
@@ -918,5 +962,80 @@ mod tests {
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::Straddle);
         assert!(strategies[0].margin.margin_required > 0.0);
+    }
+
+    #[test]
+    fn aggregate_greeks_includes_stock_delta() {
+        let positions = vec![EnrichedPosition {
+            symbol: "TSLA".to_string(),
+            underlying: "TSLA".to_string(),
+            underlying_spot: Some(400.0),
+            side: "stock".to_string(),
+            strike: None,
+            expiry: None,
+            net_quantity: 100,
+            avg_cost: 350.0,
+            current_price: 400.0,
+            unrealized_pnl_per_unit: 50.0,
+            unrealized_pnl: 5_000.0,
+            greeks: None,
+        }];
+
+        let greeks = aggregate_greeks(&positions);
+        assert_eq!(greeks.net_delta_shares, 100.0);
+        assert_eq!(greeks.total_gamma, 0.0);
+    }
+
+    #[test]
+    fn identifies_call_vertical_even_after_put_spread_consumes_indices() {
+        let positions = vec![
+            Position {
+                symbol: "SHORT0".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "call".to_string(),
+                strike: Some(400.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: -1,
+                avg_cost: 5.0,
+                total_cost: 5.0,
+            },
+            Position {
+                symbol: "AA".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "call".to_string(),
+                strike: Some(420.0),
+                expiry: Some("2026-04-17".to_string()),
+                net_quantity: -1,
+                avg_cost: 5.0,
+                total_cost: 5.0,
+            },
+            Position {
+                symbol: "LONG0".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "call".to_string(),
+                strike: Some(410.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: 1,
+                avg_cost: 2.0,
+                total_cost: 2.0,
+            },
+            Position {
+                symbol: "BBB".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "call".to_string(),
+                strike: Some(430.0),
+                expiry: Some("2026-04-17".to_string()),
+                net_quantity: 1,
+                avg_cost: 2.0,
+                total_cost: 2.0,
+            },
+        ];
+
+        let strategies = identify_strategies(&positions);
+        let bear_call_spreads = strategies
+            .iter()
+            .filter(|s| s.kind == StrategyKind::BearCallSpread)
+            .count();
+        assert_eq!(bear_call_spreads, 2);
     }
 }

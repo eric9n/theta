@@ -1,7 +1,5 @@
 use crate::analytics::ContractSide;
-use crate::domain::{
-    ContractDiagnostics, NormalizedOptionChainSnapshot, OptionContractSnapshot,
-};
+use crate::domain::{ContractDiagnostics, NormalizedOptionChainSnapshot, OptionContractSnapshot};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NormalizedChainDiagnosticsFilter {
@@ -112,7 +110,9 @@ pub fn apply_normalized_chain_diagnostics_filter(
         }
     }
 
-    chain.rows.retain(|row| row.call.is_some() || row.put.is_some());
+    chain
+        .rows
+        .retain(|row| row.call.is_some() || row.put.is_some());
 }
 
 fn matches_filter(

@@ -91,11 +91,11 @@ pub struct IdentifiedStrategy {
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyLeg {
     pub symbol: String,
-    pub side: String,         // "call", "put", "stock"
+    pub side: String, // "call", "put", "stock"
     pub strike: Option<f64>,
     pub expiry: Option<String>,
-    pub quantity: i64,        // signed: + long, - short
-    pub price: f64,           // current price
+    pub quantity: i64, // signed: + long, - short
+    pub price: f64,    // current price
 }
 
 // ---------------------------------------------------------------------------

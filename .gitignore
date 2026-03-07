@@ -7,3 +7,9 @@
 capture-signals.env
 *.local
 .gemini
+
+# Generated skill compiler output
+integrations/tellar/skills/*/SKILL.json
+
+__pycache__/
+*.pyc

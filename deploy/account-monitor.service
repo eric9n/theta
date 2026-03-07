@@ -9,8 +9,7 @@ User=root
 WorkingDirectory=/root/theta
 Environment=HOME=/root
 Environment=RUST_LOG=info
-EnvironmentFile=-/root/.config/theta/capture-signals.env
-ExecStart=/root/theta/target/release/account-monitor --loop --every-seconds 300 --market-hours-only true --account firstrade
+ExecStart=/root/theta/target/release/theta ops account-monitor --loop --every-seconds 300 --market-hours-only true --account firstrade
 Restart=always
 RestartSec=10
 

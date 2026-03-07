@@ -7,7 +7,7 @@ use crate::domain::{
 };
 use crate::market_data::parse_expiry_date;
 use crate::screening_service::ChainScreeningRequest;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 pub struct SkewSignalRequest {
     pub symbol: String,
@@ -85,15 +85,9 @@ impl ThetaSignalService {
     }
 
     pub async fn front_expiry_for_symbol(&self, symbol: &str) -> Result<time::Date> {
-        let expiry = self
-            .analysis
-            .market()
-            .fetch_option_expiries(symbol)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("no option expiries returned for {}", symbol))?;
-        parse_expiry_date(&expiry)
+        let expiries = self.analysis.market().fetch_option_expiries(symbol).await?;
+        select_front_expiry(expiries, time::OffsetDateTime::now_utc().date())
+            .with_context(|| format!("no usable option expiries returned for {}", symbol))
     }
 
     pub async fn skew(&self, req: SkewSignalRequest) -> Result<SkewSignalView> {
@@ -258,8 +252,10 @@ impl ThetaSignalService {
             req.target_delta,
             req.target_otm_percent,
         )?;
-        let smile = build_smile_signal_view(front_analysis.clone(), &req.smile_target_otm_percents)?;
-        let put_call_bias = build_put_call_bias_view(front_analysis.clone(), req.bias_min_otm_percent)?;
+        let smile =
+            build_smile_signal_view(front_analysis.clone(), &req.smile_target_otm_percents)?;
+        let put_call_bias =
+            build_put_call_bias_view(front_analysis.clone(), req.bias_min_otm_percent)?;
 
         // Throttling implemented inside build_term_structure_from_front
         let term_structure = self
@@ -299,7 +295,11 @@ impl ThetaSignalService {
         iv_from_market_price: bool,
         prefetched_front: Option<crate::domain::ChainAnalysisView>,
     ) -> Result<TermStructureView> {
-        let expiry_strings = self.analysis.market().fetch_option_expiries(&symbol).await?;
+        let expiry_strings = self
+            .analysis
+            .market()
+            .fetch_option_expiries(&symbol)
+            .await?;
         let expiries: Vec<time::Date> = expiry_strings
             .into_iter()
             .map(|value| parse_expiry_date(&value))
@@ -313,7 +313,10 @@ impl ThetaSignalService {
 
         for (i, expiry) in expiries.into_iter().enumerate() {
             // Reuse prefetched front analysis if applicable
-            let analysis = if i == 0 && let Some(view) = prefetched_front.clone() && view.expiry == expiry.to_string() {
+            let analysis = if i == 0
+                && let Some(view) = prefetched_front.clone()
+                && view.expiry == expiry.to_string()
+            {
                 view
             } else {
                 // Throttling: introduce a small gap to avoid concurrent API rate limit 301607/max concurrent
@@ -322,24 +325,24 @@ impl ThetaSignalService {
                 }
 
                 self.adaptive_analyze_chain(
-                        expiry,
-                        AnalyzeChainRequest {
-                            symbol: symbol.clone(),
-                            rate,
-                            dividend,
-                            iv,
-                            iv_from_market_price,
-                            screening: ChainScreeningRequest {
-                                only_liquid: true,
-                                exclude_abnormal: true,
-                                exclude_near_expiry: true,
-                                min_otm_percent: Some(-0.15), // Term structure can be +/- 15%
-                                max_otm_percent: Some(0.15),
-                                ..Default::default()
-                            },
+                    expiry,
+                    AnalyzeChainRequest {
+                        symbol: symbol.clone(),
+                        rate,
+                        dividend,
+                        iv,
+                        iv_from_market_price,
+                        screening: ChainScreeningRequest {
+                            only_liquid: true,
+                            exclude_abnormal: true,
+                            exclude_near_expiry: true,
+                            min_otm_percent: Some(-0.15), // Term structure can be +/- 15%
+                            max_otm_percent: Some(0.15),
+                            ..Default::default()
                         },
-                    )
-                    .await?
+                    },
+                )
+                .await?
             };
 
             points.push(build_term_structure_point(&analysis)?);
@@ -353,7 +356,7 @@ impl ThetaSignalService {
             points,
         })
     }
- 
+
     async fn adaptive_analyze_chain(
         &self,
         expiry: time::Date,
@@ -371,7 +374,9 @@ impl ThetaSignalService {
                 Err(e) if e.to_string().contains("301607") && otm_range > min_range => {
                     tracing::warn!(
                         "Hit 301607 error for {} @ {} with range +/- {:.2}%. Narrowing range and retrying...",
-                        req.symbol, expiry, otm_range * 100.0
+                        req.symbol,
+                        expiry,
+                        otm_range * 100.0
                     );
                     otm_range *= 0.6; // Narrow range by 40%
                     if otm_range < min_range {
@@ -433,8 +438,12 @@ fn build_skew_signal_view(
     let otm_call = select_by_otm(&analysis.rows, ContractSide::Call, target_otm_percent)?;
 
     let delta_skew = pair_diff(delta_put.as_ref(), delta_call.as_ref());
-    let delta_put_wing_vs_atm = delta_put.as_ref().map(|leg| leg.implied_volatility - atm_iv);
-    let delta_call_wing_vs_atm = delta_call.as_ref().map(|leg| leg.implied_volatility - atm_iv);
+    let delta_put_wing_vs_atm = delta_put
+        .as_ref()
+        .map(|leg| leg.implied_volatility - atm_iv);
+    let delta_call_wing_vs_atm = delta_call
+        .as_ref()
+        .map(|leg| leg.implied_volatility - atm_iv);
     let otm_skew = pair_diff(otm_put.as_ref(), otm_call.as_ref());
     let otm_put_wing_vs_atm = otm_put.as_ref().map(|leg| leg.implied_volatility - atm_iv);
     let otm_call_wing_vs_atm = otm_call.as_ref().map(|leg| leg.implied_volatility - atm_iv);
@@ -463,9 +472,12 @@ fn build_skew_signal_view(
     })
 }
 
-fn build_term_structure_point(analysis: &crate::domain::ChainAnalysisView) -> Result<TermStructurePoint> {
+fn build_term_structure_point(
+    analysis: &crate::domain::ChainAnalysisView,
+) -> Result<TermStructurePoint> {
     let atm_strike_price = find_atm_strike_price(&analysis.rows)?;
-    let atm_call_iv = find_leg_iv_for_strike(&analysis.rows, &atm_strike_price, ContractSide::Call)?;
+    let atm_call_iv =
+        find_leg_iv_for_strike(&analysis.rows, &atm_strike_price, ContractSide::Call)?;
     let atm_put_iv = find_leg_iv_for_strike(&analysis.rows, &atm_strike_price, ContractSide::Put)?;
     let atm_iv = match (atm_call_iv, atm_put_iv) {
         (Some(call), Some(put)) => (call + put) / 2.0,
@@ -570,8 +582,11 @@ fn build_market_tone_summary(
     term_structure: &TermStructureView,
 ) -> MarketToneSummary {
     let farthest = term_structure.points.last();
-    let downside_protection =
-        classify_downside_protection(skew.delta_skew, skew.otm_skew, put_call_bias.otm_average_iv_bias);
+    let downside_protection = classify_downside_protection(
+        skew.delta_skew,
+        skew.otm_skew,
+        put_call_bias.otm_average_iv_bias,
+    );
     let term_structure_shape =
         classify_term_structure_shape(farthest.and_then(|point| point.iv_change_from_front));
     let wing_shape = classify_wing_shape(smile.put_wing_slope, smile.call_wing_slope);
@@ -791,6 +806,30 @@ fn find_leg_iv_for_strike(
         .transpose()
 }
 
+fn select_front_expiry(expiries: Vec<String>, today: time::Date) -> Result<time::Date> {
+    let mut parsed = Vec::with_capacity(expiries.len());
+    for expiry in expiries {
+        parsed.push(parse_expiry_date(&expiry)?);
+    }
+
+    if let Some(expiry) = parsed
+        .iter()
+        .copied()
+        .find(|expiry| (*expiry - today).whole_days() > 1)
+    {
+        return Ok(expiry);
+    }
+
+    if let Some(expiry) = parsed.iter().copied().find(|expiry| *expiry >= today) {
+        return Ok(expiry);
+    }
+
+    parsed
+        .into_iter()
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("no option expiries available"))
+}
+
 fn select_by_delta(
     rows: &[ChainAnalysisRow],
     side: ContractSide,
@@ -907,7 +946,8 @@ fn to_skew_leg_point(row: &ChainAnalysisRow) -> Result<SkewLegPoint> {
 }
 
 fn parse_iv(value: &str) -> Result<f64> {
-    value.parse::<f64>()
+    value
+        .parse::<f64>()
         .map_err(|_| anyhow::anyhow!("failed to parse implied volatility"))
 }
 
@@ -995,9 +1035,16 @@ mod tests {
 
         assert_eq!(view.atm_strike_price, "400");
         assert!((view.atm_iv - 0.33).abs() < 1.0e-9);
-        assert_eq!(view.delta_put.as_ref().map(|leg| leg.option_symbol.as_str()), Some("PUT25"));
         assert_eq!(
-            view.delta_call.as_ref().map(|leg| leg.option_symbol.as_str()),
+            view.delta_put
+                .as_ref()
+                .map(|leg| leg.option_symbol.as_str()),
+            Some("PUT25")
+        );
+        assert_eq!(
+            view.delta_call
+                .as_ref()
+                .map(|leg| leg.option_symbol.as_str()),
             Some("CALL25")
         );
         assert!((view.delta_skew.expect("delta skew") - 0.10).abs() < 1.0e-9);
@@ -1333,5 +1380,31 @@ mod tests {
         row.volume = volume;
         row.open_interest = open_interest;
         row
+    }
+
+    #[test]
+    fn select_front_expiry_skips_expired_and_near_expiry_dates() {
+        let today = time::macros::date!(2026 - 03 - 06);
+        let expiry = super::select_front_expiry(
+            vec![
+                "2026-03-02".to_string(),
+                "2026-03-06".to_string(),
+                "2026-03-09".to_string(),
+                "2026-03-20".to_string(),
+            ],
+            today,
+        )
+        .expect("front expiry should resolve");
+
+        assert_eq!(expiry, time::macros::date!(2026 - 03 - 09));
+    }
+
+    #[test]
+    fn select_front_expiry_falls_back_to_same_day_when_needed() {
+        let today = time::macros::date!(2026 - 03 - 06);
+        let expiry = super::select_front_expiry(vec!["2026-03-06".to_string()], today)
+            .expect("same-day expiry should resolve");
+
+        assert_eq!(expiry, today);
     }
 }

@@ -9,8 +9,7 @@ User=%i
 WorkingDirectory=%h/theta
 Environment=HOME=%h
 Environment=RUST_LOG=info
-EnvironmentFile=-%h/.config/theta/capture-signals.env
-ExecStart=%h/theta/target/release/capture-signals --loop --every-seconds 300 --market-hours-only
+ExecStart=%h/theta/target/release/theta signals capture --loop --every-seconds 300
 Restart=always
 RestartSec=10
 

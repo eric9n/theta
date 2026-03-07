@@ -9,7 +9,8 @@ use crate::rate::RateCurve;
 use crate::screening_service::{
     ChainScreeningRequest, apply_chain_screening, validate_metric_bounds, validate_strike_bounds,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use std::collections::HashMap;
 
 pub struct AnalyzeOptionRequest {
     pub symbol: String,
@@ -35,6 +36,8 @@ pub struct AnalyzeChainRequest {
 pub struct ThetaAnalysisService {
     market: MarketDataClient,
     rate_curve: RateCurve,
+    default_dividend_yield: f64,
+    dividend_yields: HashMap<String, f64>,
 }
 
 impl ThetaAnalysisService {
@@ -43,11 +46,29 @@ impl ThetaAnalysisService {
         Ok(Self {
             market: MarketDataClient::connect().await?,
             rate_curve: config.rate_curve,
+            default_dividend_yield: config.default_dividend_yield,
+            dividend_yields: config.dividend_yields,
         })
     }
 
     pub fn market(&self) -> &MarketDataClient {
         &self.market
+    }
+
+    pub fn rate_for_days(&self, days_to_expiry: i64) -> f64 {
+        self.rate_curve.rate_for_days(days_to_expiry)
+    }
+
+    pub fn rate_curve(&self) -> RateCurve {
+        self.rate_curve
+    }
+
+    pub fn dividend_yield_for_symbol(&self, symbol: &str) -> f64 {
+        let key = normalize_symbol_key(symbol);
+        self.dividend_yields
+            .get(&key)
+            .copied()
+            .unwrap_or(self.default_dividend_yield)
     }
 
     pub async fn analyze_option(&self, req: AnalyzeOptionRequest) -> Result<OptionAnalysisView> {
@@ -173,13 +194,20 @@ impl ThetaAnalysisService {
             ) {
                 Ok(res) => res,
                 Err(e) => {
-                    tracing::warn!("Skipping contract {} due to IV resolution error: {}", contract.symbol, e);
+                    tracing::warn!(
+                        "Skipping contract {} due to IV resolution error: {}",
+                        contract.symbol,
+                        e
+                    );
                     continue;
                 }
             };
 
             if effective_iv <= 0.0 {
-                tracing::warn!("Skipping contract {} due to invalid 0.0 IV", contract.symbol);
+                tracing::warn!(
+                    "Skipping contract {} due to invalid 0.0 IV",
+                    contract.symbol
+                );
                 continue;
             }
 
@@ -240,12 +268,24 @@ impl ThetaAnalysisService {
     }
 }
 
-fn resolve_rate(explicit_rate: Option<f64>, curve: RateCurve, days_to_expiry: i64) -> (f64, String) {
+fn resolve_rate(
+    explicit_rate: Option<f64>,
+    curve: RateCurve,
+    days_to_expiry: i64,
+) -> (f64, String) {
     if let Some(rate) = explicit_rate {
         (rate, "manual".to_string())
     } else {
-        (curve.rate_for_days(days_to_expiry), "curve_default".to_string())
+        (
+            curve.rate_for_days(days_to_expiry),
+            "curve_default".to_string(),
+        )
     }
+}
+
+fn normalize_symbol_key(symbol: &str) -> String {
+    let upper = symbol.trim().to_ascii_uppercase();
+    upper.trim_end_matches(".US").to_string()
 }
 
 fn resolve_iv(
@@ -278,7 +318,11 @@ fn resolve_iv(
             option_type,
             price,
         )?;
-        return Ok((solved, "solved_from_price".to_string(), Some(price.to_string())));
+        return Ok((
+            solved,
+            "solved_from_price".to_string(),
+            Some(price.to_string()),
+        ));
     }
 
     if iv_from_market_price {
@@ -299,4 +343,26 @@ fn resolve_iv(
     }
 
     Ok((provider_iv, "provider".to_string(), None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_dividend_yield_by_symbol_with_default_fallback() {
+        let service = ThetaAnalysisService {
+            market: MarketDataClient,
+            rate_curve: RateCurve::default(),
+            default_dividend_yield: 0.01,
+            dividend_yields: HashMap::from([
+                ("SPY".to_string(), 0.013),
+                ("QQQ".to_string(), 0.006),
+            ]),
+        };
+
+        assert!((service.dividend_yield_for_symbol("SPY.US") - 0.013).abs() < 1.0e-12);
+        assert!((service.dividend_yield_for_symbol("qqq") - 0.006).abs() < 1.0e-12);
+        assert!((service.dividend_yield_for_symbol("TSLA.US") - 0.01).abs() < 1.0e-12);
+    }
 }

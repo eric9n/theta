@@ -1,7 +1,9 @@
 pub mod accounting_service;
-pub mod analytics;
 pub mod analysis_service;
+pub mod analytics;
+pub mod cli;
 pub mod config;
+pub mod daemon_protocol;
 pub mod diagnostics;
 pub mod domain;
 pub mod ledger;
@@ -15,4 +17,3 @@ pub mod screening_service;
 pub mod signal_service;
 pub mod snapshot_store;
 pub mod strategy_service;
-pub mod daemon_protocol;

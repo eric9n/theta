@@ -1,12 +1,15 @@
 use crate::analytics::ContractSide;
-use crate::domain::{OptionChainSnapshot, OptionContractSnapshot, ProviderGreeks, UnderlyingSnapshot};
 use crate::daemon_protocol::{DaemonRequest, DaemonResponse};
-use anyhow::{bail, Context, Result};
+use crate::domain::{
+    OptionChainSnapshot, OptionContractSnapshot, ProviderGreeks, UnderlyingSnapshot,
+};
+use anyhow::{Context, Result, bail};
+use serde::Deserializer;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::json;
+use time::{Date, OffsetDateTime};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use time::{Date, OffsetDateTime};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::json;
 
 // --- Local Mirror Types for LongPort SDK JSON structure ---
 // These allow core to be independent of the longport crate.
@@ -24,8 +27,10 @@ pub enum Market {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum OptionDirection {
     #[serde(rename = "CALL")]
+    #[serde(alias = "Call")]
     Call,
     #[serde(rename = "PUT")]
+    #[serde(alias = "Put")]
     Put,
     #[serde(other)]
     Unknown,
@@ -59,6 +64,7 @@ pub struct OptionQuote {
     pub timestamp: String,
     pub trade_status: serde_json::Value,
     pub strike_price: String,
+    #[serde(deserialize_with = "deserialize_date")]
     pub expiry_date: Date,
     pub implied_volatility: String,
     pub open_interest: i64,
@@ -83,11 +89,13 @@ pub struct SecurityCalcIndex {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketTradingDays {
     pub market: Market,
+    #[serde(deserialize_with = "deserialize_date_vec")]
     pub trading_days: Vec<Date>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrikePriceInfo {
+    #[serde(alias = "price")]
     pub strike_price: String,
     pub call_symbol: String,
     pub put_symbol: String,
@@ -103,25 +111,34 @@ pub struct MarketDataClient;
 impl MarketDataClient {
     pub async fn connect() -> Result<Self> {
         if !std::path::Path::new(SOCKET_PATH).exists() {
-            bail!("Theta daemon is not running (socket not found at {})", SOCKET_PATH);
+            bail!(
+                "Theta daemon is not running (socket not found at {})",
+                SOCKET_PATH
+            );
         }
         // Verify connectivity
-        let _ = UnixStream::connect(SOCKET_PATH).await
+        let _ = UnixStream::connect(SOCKET_PATH)
+            .await
             .context("Failed to connect to Theta daemon")?;
         Ok(Self)
     }
 
     /// Generic UDS RPC call helper.
     /// Acts as a transparent gateway for any SDK method.
-    async fn rpc_call<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
-        let mut stream = UnixStream::connect(SOCKET_PATH).await
+    async fn rpc_call<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R> {
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .await
             .with_context(|| format!("Proxy call failed for method {}", method))?;
-        
+
         let req = DaemonRequest {
             method: method.to_string(),
             params: serde_json::to_value(params)?,
         };
-        
+
         let mut req_json = serde_json::to_string(&req)?;
         req_json.push('\n');
         stream.write_all(req_json.as_bytes()).await?;
@@ -149,24 +166,32 @@ impl MarketDataClient {
     // These methods implement the "Theta" domain specific logic by calling raw SDK methods via proxy.
 
     pub async fn fetch_underlying(&self, symbol: &str) -> Result<UnderlyingSnapshot> {
-        let mut quotes: Vec<SecurityQuote> = self.rpc_call("quote", vec![symbol.to_string()]).await?;
+        let mut quotes: Vec<SecurityQuote> =
+            self.rpc_call("quote", vec![symbol.to_string()]).await?;
         let quote = quotes.pop().context("no quote found for symbol")?;
         snapshot_from_quote(quote)
     }
 
     pub async fn fetch_option_contract(&self, symbol: &str) -> Result<OptionContractSnapshot> {
-        let mut quotes: Vec<OptionQuote> = self.rpc_call("option_quote", vec![symbol.to_string()]).await?;
+        let mut quotes: Vec<OptionQuote> = self
+            .rpc_call("option_quote", vec![symbol.to_string()])
+            .await?;
         let quote = quotes.pop().context("no option quote found")?;
         option_snapshot_from_quote(quote)
     }
 
     pub async fn fetch_option_expiries(&self, symbol: &str) -> Result<Vec<String>> {
-        let expiries: Vec<Date> = self.rpc_call("option_chain_expiry_date_list", symbol.to_string()).await?;
-        Ok(expiries.into_iter().map(|date| date.to_string()).collect())
+        self.rpc_call("option_chain_expiry_date_list", symbol.to_string())
+            .await
     }
 
-    pub async fn batch_quote(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
-        if symbols.is_empty() { return Ok(Default::default()); }
+    pub async fn batch_quote(
+        &self,
+        symbols: &[String],
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        if symbols.is_empty() {
+            return Ok(Default::default());
+        }
         let quotes: Vec<SecurityQuote> = self.rpc_call("quote", symbols.to_vec()).await?;
         let mut map = std::collections::HashMap::new();
         for q in quotes {
@@ -179,45 +204,79 @@ impl MarketDataClient {
     }
 
     pub async fn batch_option_quote(&self, symbols: &[String]) -> Result<Vec<OptionQuote>> {
-        if symbols.is_empty() { return Ok(vec![]); }
+        if symbols.is_empty() {
+            return Ok(vec![]);
+        }
         self.rpc_call("option_quote", symbols.to_vec()).await
     }
 
     pub async fn fetch_provider_greeks(&self, symbol: &str) -> Result<ProviderGreeks> {
-        let mut rows: Vec<SecurityCalcIndex> = self.rpc_call("calc_indexes", json!({
-            "symbols": vec![symbol.to_string()],
-            "indexes": vec!["ImpliedVolatility", "Delta", "Gamma", "Theta", "Vega", "Rho"]
-        })).await?;
+        let mut rows: Vec<SecurityCalcIndex> = self
+            .rpc_call(
+                "calc_indexes",
+                json!({
+                    "symbols": vec![symbol.to_string()],
+                    "indexes": vec!["ImpliedVolatility", "Delta", "Gamma", "Theta", "Vega", "Rho"]
+                }),
+            )
+            .await?;
         let row = rows.pop().context("no calc data found")?;
         Ok(provider_greeks_view(row))
     }
 
-    pub async fn fetch_trading_days(&self, market: Market, start: Date, end: Date) -> Result<Vec<Date>> {
-        let days_resp: MarketTradingDays = self.rpc_call("trading_days", json!({
-            "market": market,
-            "start": start.to_string(),
-            "end": end.to_string()
-        })).await?;
+    pub async fn fetch_trading_days(
+        &self,
+        market: Market,
+        start: Date,
+        end: Date,
+    ) -> Result<Vec<Date>> {
+        let days_resp: MarketTradingDays = self
+            .rpc_call(
+                "trading_days",
+                json!({
+                    "market": market,
+                    "start": start.to_string(),
+                    "end": end.to_string()
+                }),
+            )
+            .await?;
         Ok(days_resp.trading_days)
     }
 
-    pub async fn fetch_option_chain(&self, symbol: &str, expiry: Date) -> Result<OptionChainSnapshot> {
+    pub async fn fetch_option_chain(
+        &self,
+        symbol: &str,
+        expiry: Date,
+    ) -> Result<OptionChainSnapshot> {
         let underlying = self.fetch_underlying(symbol).await?;
         let days_to_expiry = days_to_expiry(expiry);
 
-        let info: Vec<StrikePriceInfo> = self.rpc_call("option_chain_info_by_date", json!({
-            "symbol": symbol.to_string(),
-            "expiry": expiry.to_string()
-        })).await?;
+        let info: Vec<StrikePriceInfo> = self
+            .rpc_call(
+                "option_chain_info_by_date",
+                json!({
+                    "symbol": symbol.to_string(),
+                    "expiry": expiry.to_string()
+                }),
+            )
+            .await?;
 
-        let option_symbols: Vec<String> = info.iter().flat_map(|s| [s.call_symbol.clone(), s.put_symbol.clone()]).collect();
+        let option_symbols: Vec<String> = info
+            .iter()
+            .flat_map(|s| [s.call_symbol.clone(), s.put_symbol.clone()])
+            .collect();
         let option_quotes = self.batch_option_quote(&option_symbols).await?;
-        
+
         let mut contracts = Vec::with_capacity(option_quotes.len());
         for quote in option_quotes {
             contracts.push(option_snapshot_from_quote(quote)?);
         }
-        Ok(OptionChainSnapshot { underlying, expiry, days_to_expiry, contracts })
+        Ok(OptionChainSnapshot {
+            underlying,
+            expiry,
+            days_to_expiry,
+            contracts,
+        })
     }
 }
 
@@ -266,7 +325,7 @@ pub fn option_snapshot_from_quote(quote: OptionQuote) -> Result<OptionContractSn
         volume: quote.volume,
         turnover: quote.turnover.clone(),
         turnover_f64: decimal_to_f64(&quote.turnover, "turnover")?,
-        trade_status: format!("{:?}", quote.trade_status),
+        trade_status: json_value_as_string(&quote.trade_status),
         strike_price: quote.strike_price.clone(),
         strike_price_f64: decimal_to_f64(&quote.strike_price, "strike")?,
         expiry: quote.expiry_date,
@@ -279,7 +338,7 @@ pub fn option_snapshot_from_quote(quote: OptionQuote) -> Result<OptionContractSn
         contract_multiplier_f64: decimal_to_f64(&quote.contract_multiplier, "mult")?,
         contract_size: quote.contract_size.clone(),
         contract_size_f64: decimal_to_f64(&quote.contract_size, "size")?,
-        contract_style: format!("{:?}", quote.contract_type),
+        contract_style: json_value_as_string(&quote.contract_type),
     })
 }
 
@@ -307,4 +366,155 @@ pub fn days_to_expiry(expiry: Date) -> i64 {
     let today = OffsetDateTime::now_utc().date();
     let days = (expiry - today).whole_days();
     if days < 1 { 1 } else { days }
+}
+
+fn json_value_as_string(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn deserialize_date<'de, D>(deserializer: D) -> std::result::Result<Date, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    parse_expiry_date(&raw).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_date_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<Date>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<String>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|value| parse_expiry_date(&value).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MarketTradingDays, OptionDirection, OptionQuote, option_snapshot_from_quote};
+
+    #[test]
+    fn option_quote_deserializes_string_expiry_date() {
+        let quote: OptionQuote = serde_json::from_value(serde_json::json!({
+            "symbol": "TSLA250321C00300000.US",
+            "underlying_symbol": "TSLA.US",
+            "direction": "CALL",
+            "last_done": "1.23",
+            "prev_close": "1.20",
+            "open": "1.21",
+            "high": "1.30",
+            "low": "1.10",
+            "volume": 10,
+            "turnover": "1234.5",
+            "timestamp": "2026-03-06T12:00:00Z",
+            "trade_status": "NORMAL",
+            "strike_price": "300",
+            "expiry_date": "2026-03-21",
+            "implied_volatility": "0.55",
+            "open_interest": 100,
+            "historical_volatility": "0.40",
+            "contract_multiplier": "100",
+            "contract_size": "100",
+            "contract_type": "AMERICAN"
+        }))
+        .expect("option quote should deserialize");
+
+        assert!(matches!(quote.direction, OptionDirection::Call));
+        assert_eq!(quote.expiry_date.to_string(), "2026-03-21");
+    }
+
+    #[test]
+    fn option_quote_deserializes_title_case_direction() {
+        let quote: OptionQuote = serde_json::from_value(serde_json::json!({
+            "symbol": "TSLA260320C400000.US",
+            "underlying_symbol": "TSLA.US",
+            "direction": "Call",
+            "last_done": "17.05",
+            "prev_close": "17.90",
+            "open": "14.65",
+            "high": "19.05",
+            "low": "14.50",
+            "volume": 2872,
+            "turnover": "4717016.00",
+            "timestamp": "2026-03-05T21:00:00Z",
+            "trade_status": "Normal",
+            "strike_price": "400.00",
+            "expiry_date": "2026-03-20",
+            "implied_volatility": "0.417",
+            "open_interest": 9259,
+            "historical_volatility": "0.3453",
+            "contract_multiplier": "100",
+            "contract_size": "100",
+            "contract_type": "American"
+        }))
+        .expect("option quote should deserialize");
+
+        assert!(matches!(quote.direction, OptionDirection::Call));
+    }
+
+    #[test]
+    fn trading_days_deserialize_from_string_dates() {
+        let payload = serde_json::json!({
+            "market": "U_S",
+            "trading_days": ["2026-03-06", "2026-03-09"]
+        });
+
+        let days: MarketTradingDays =
+            serde_json::from_value(payload).expect("trading days should deserialize");
+        let rendered: Vec<String> = days
+            .trading_days
+            .into_iter()
+            .map(|day| day.to_string())
+            .collect();
+        assert_eq!(rendered, vec!["2026-03-06", "2026-03-09"]);
+    }
+
+    #[test]
+    fn strike_price_info_deserializes_price_alias() {
+        let row: super::StrikePriceInfo = serde_json::from_value(serde_json::json!({
+            "price": "400",
+            "call_symbol": "TSLA260320C400000.US",
+            "put_symbol": "TSLA260320P400000.US",
+            "standard": true
+        }))
+        .expect("strike info should deserialize");
+
+        assert_eq!(row.strike_price, "400");
+    }
+
+    #[test]
+    fn option_snapshot_normalizes_json_string_fields() {
+        let quote: OptionQuote = serde_json::from_value(serde_json::json!({
+            "symbol": "TSLA260320C400000.US",
+            "underlying_symbol": "TSLA.US",
+            "direction": "Call",
+            "last_done": "17.05",
+            "prev_close": "17.90",
+            "open": "14.65",
+            "high": "19.05",
+            "low": "14.50",
+            "volume": 2872,
+            "turnover": "4717016.00",
+            "timestamp": "2026-03-05T21:00:00Z",
+            "trade_status": "Normal",
+            "strike_price": "400.00",
+            "expiry_date": "2026-03-20",
+            "implied_volatility": "0.417",
+            "open_interest": 9259,
+            "historical_volatility": "0.3453",
+            "contract_multiplier": "100",
+            "contract_size": "100",
+            "contract_type": "American"
+        }))
+        .expect("option quote should deserialize");
+
+        let snapshot =
+            option_snapshot_from_quote(quote).expect("snapshot conversion should succeed");
+        assert_eq!(snapshot.trade_status, "Normal");
+        assert_eq!(snapshot.contract_style, "American");
+    }
 }

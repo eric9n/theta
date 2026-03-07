@@ -5,60 +5,12 @@ edition = "2024"
 autobins = false
 
 [[bin]]
-name = "snapshot"
-path = "src/bin/snapshot.rs"
-
-[[bin]]
-name = "capture-signals"
-path = "src/bin/capture_signals.rs"
-
-[[bin]]
-name = "signal-history"
-path = "src/bin/signal_history.rs"
-
-[[bin]]
-name = "iv-rank"
-path = "src/bin/iv_rank.rs"
-
-[[bin]]
-name = "portfolio"
-path = "src/bin/portfolio.rs"
-
-[[bin]]
-name = "skew"
-path = "src/bin/skew.rs"
-
-[[bin]]
-name = "smile"
-path = "src/bin/smile.rs"
-
-[[bin]]
-name = "put-call-bias"
-path = "src/bin/put_call_bias.rs"
-
-[[bin]]
-name = "market-tone"
-path = "src/bin/market_tone.rs"
-
-[[bin]]
-name = "market-extreme"
-path = "src/bin/market_extreme.rs"
-
-[[bin]]
-name = "relative-extreme"
-path = "src/bin/relative_extreme.rs"
-
-[[bin]]
-name = "term-structure"
-path = "src/bin/term_structure.rs"
+name = "theta"
+path = "src/bin/theta.rs"
 
 [[bin]]
 name = "mcp-server"
 path = "src/bin/mcp_server.rs"
-
-[[bin]]
-name = "account-monitor"
-path = "src/bin/account_monitor.rs"
 
 [dependencies]
 anyhow = "1.0"
@@ -82,3 +34,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 rustls = { version = "0.23", features = ["ring"] }
 futures = "0.3.32"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.20"

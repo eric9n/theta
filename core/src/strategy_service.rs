@@ -4,11 +4,10 @@ use crate::domain::{
     BearCallSpreadCandidate, BearCallSpreadView, BearPutSpreadCandidate, BearPutSpreadView,
     BullCallSpreadCandidate, BullCallSpreadView, BullPutSpreadCandidate, BullPutSpreadView,
     CalendarCallSpreadCandidate, CalendarCallSpreadView, CalendarPutSpreadCandidate,
-    CalendarPutSpreadView, DiagonalCallSpreadCandidate, DiagonalCallSpreadView,
-    DiagonalPutSpreadCandidate, DiagonalPutSpreadView,
-    CashSecuredPutCandidate, CashSecuredPutView, ChainAnalysisRow, ChainAnalysisView,
-    CoveredCallCandidate, CoveredCallView, MispricingCandidate, MispricingView,
-    SellOpportunitiesView, SellOpportunityCandidate,
+    CalendarPutSpreadView, CashSecuredPutCandidate, CashSecuredPutView, ChainAnalysisRow,
+    ChainAnalysisView, CoveredCallCandidate, CoveredCallView, DiagonalCallSpreadCandidate,
+    DiagonalCallSpreadView, DiagonalPutSpreadCandidate, DiagonalPutSpreadView, MispricingCandidate,
+    MispricingView, SellOpportunitiesView, SellOpportunityCandidate, SellOpportunityReturnBasis,
 };
 use crate::screening_service::ChainScreeningRequest;
 use anyhow::{Result, bail};
@@ -267,6 +266,8 @@ pub struct SellOpportunitiesRequest {
     pub max_strike_gap: Option<f64>,
     pub strategy_filter: Vec<SellOpportunityStrategy>,
     pub exclude_strategy_filter: Vec<SellOpportunityStrategy>,
+    pub return_basis_filter: Vec<SellOpportunityReturnBasis>,
+    pub exclude_return_basis_filter: Vec<SellOpportunityReturnBasis>,
     pub min_premium_or_credit: Option<f64>,
     pub max_risk: Option<f64>,
     pub min_annualized_return: Option<f64>,
@@ -1383,6 +1384,8 @@ impl ThetaStrategyService {
             diagonal_put,
             &req.strategy_filter,
             &req.exclude_strategy_filter,
+            &req.return_basis_filter,
+            &req.exclude_return_basis_filter,
             req.min_premium_or_credit,
             req.max_risk,
             req.min_abs_mispricing_percent,
@@ -1416,9 +1419,8 @@ fn sort_sell_opportunities(
     let sort_by = sort_by.unwrap_or(SellOpportunitySortField::AnnualizedReturn);
     candidates.sort_by(|a, b| {
         let primary = match sort_by {
-            SellOpportunitySortField::AnnualizedReturn => {
-                b.annualized_return.total_cmp(&a.annualized_return)
-            }
+            SellOpportunitySortField::AnnualizedReturn => sell_opportunity_annualized_sort_key(b)
+                .cmp(&sell_opportunity_annualized_sort_key(a)),
             SellOpportunitySortField::Mispricing => b
                 .mispricing_percent
                 .abs()
@@ -1429,12 +1431,26 @@ fn sort_sell_opportunities(
         };
 
         primary
-            .then_with(|| b.annualized_return.total_cmp(&a.annualized_return))
-            .then_with(|| b.mispricing_percent.abs().total_cmp(&a.mispricing_percent.abs()))
+            .then_with(|| {
+                sell_opportunity_annualized_sort_key(b)
+                    .cmp(&sell_opportunity_annualized_sort_key(a))
+            })
+            .then_with(|| {
+                b.mispricing_percent
+                    .abs()
+                    .total_cmp(&a.mispricing_percent.abs())
+            })
             .then_with(|| b.iv_diff_percent.abs().total_cmp(&a.iv_diff_percent.abs()))
             .then_with(|| a.strategy.cmp(&b.strategy))
             .then_with(|| a.primary_symbol.cmp(&b.primary_symbol))
     });
+}
+
+fn sell_opportunity_annualized_sort_key(candidate: &SellOpportunityCandidate) -> (bool, u64) {
+    (
+        candidate.return_basis != SellOpportunityReturnBasis::ThetaCarryRunRate,
+        candidate.annualized_return.to_bits(),
+    )
 }
 
 fn matches_sell_opportunity_strategy(
@@ -1445,9 +1461,19 @@ fn matches_sell_opportunity_strategy(
         return true;
     }
 
-    strategy_filter.iter().any(|strategy| {
-        sell_opportunity_strategy_name(*strategy) == name
-    })
+    strategy_filter
+        .iter()
+        .any(|strategy| sell_opportunity_strategy_name(*strategy) == name)
+}
+
+fn matches_sell_opportunity_return_basis(
+    basis: SellOpportunityReturnBasis,
+    return_basis_filter: &[SellOpportunityReturnBasis],
+) -> bool {
+    if return_basis_filter.is_empty() {
+        return true;
+    }
+    return_basis_filter.contains(&basis)
 }
 
 fn sell_opportunity_strategy_name(strategy: SellOpportunityStrategy) -> &'static str {
@@ -1472,6 +1498,15 @@ fn should_include_sell_opportunity_strategy(
         && !exclude_strategy_filter
             .iter()
             .any(|strategy| sell_opportunity_strategy_name(*strategy) == name)
+}
+
+fn should_include_sell_opportunity_return_basis(
+    basis: SellOpportunityReturnBasis,
+    return_basis_filter: &[SellOpportunityReturnBasis],
+    exclude_return_basis_filter: &[SellOpportunityReturnBasis],
+) -> bool {
+    matches_sell_opportunity_return_basis(basis, return_basis_filter)
+        && !exclude_return_basis_filter.contains(&basis)
 }
 
 fn matches_range(value: f64, min: Option<f64>, max: Option<f64>) -> bool {
@@ -1521,16 +1556,21 @@ fn sort_mispricing_candidates(
     let sort_by = sort_by.unwrap_or(MispricingSortField::Mispricing);
     candidates.sort_by(|a, b| {
         let primary = match sort_by {
-            MispricingSortField::Mispricing => {
-                b.mispricing_percent.abs().total_cmp(&a.mispricing_percent.abs())
-            }
+            MispricingSortField::Mispricing => b
+                .mispricing_percent
+                .abs()
+                .total_cmp(&a.mispricing_percent.abs()),
             MispricingSortField::IvDiff => {
                 b.iv_diff_percent.abs().total_cmp(&a.iv_diff_percent.abs())
             }
         };
 
         primary
-            .then_with(|| b.mispricing_percent.abs().total_cmp(&a.mispricing_percent.abs()))
+            .then_with(|| {
+                b.mispricing_percent
+                    .abs()
+                    .total_cmp(&a.mispricing_percent.abs())
+            })
             .then_with(|| b.iv_diff_percent.abs().total_cmp(&a.iv_diff_percent.abs()))
             .then_with(|| a.option_symbol.cmp(&b.option_symbol))
     });
@@ -2389,7 +2429,11 @@ fn build_calendar_spread_candidates(
     min_strike_gap: Option<f64>,
     max_strike_gap: Option<f64>,
     pairing: DualExpiryPairing,
-) -> Result<(ChainAnalysisView, ChainAnalysisView, Vec<CalendarSpreadCandidateCore>)> {
+) -> Result<(
+    ChainAnalysisView,
+    ChainAnalysisView,
+    Vec<CalendarSpreadCandidateCore>,
+)> {
     let far_rows = far.rows;
     let days_gap = far.days_to_expiry - near.days_to_expiry;
 
@@ -2413,7 +2457,8 @@ fn build_calendar_spread_candidates(
         rows: Vec::new(),
     };
 
-    if !matches_min_count(days_gap, min_days_gap) || max_days_gap.is_some_and(|max| days_gap > max) {
+    if !matches_min_count(days_gap, min_days_gap) || max_days_gap.is_some_and(|max| days_gap > max)
+    {
         return Ok((near_meta, far_meta, candidates));
     }
 
@@ -2518,7 +2563,10 @@ fn build_calendar_spread_candidates(
     candidates.sort_by(|a, b| {
         b.annualized_theta_carry_return_on_debit
             .total_cmp(&a.annualized_theta_carry_return_on_debit)
-            .then_with(|| b.net_theta_carry_per_day.total_cmp(&a.net_theta_carry_per_day))
+            .then_with(|| {
+                b.net_theta_carry_per_day
+                    .total_cmp(&a.net_theta_carry_per_day)
+            })
             .then_with(|| a.net_debit_per_spread.total_cmp(&b.net_debit_per_spread))
             .then_with(|| a.near_strike_price.cmp(&b.near_strike_price))
             .then_with(|| a.far_strike_price.cmp(&b.far_strike_price))
@@ -2616,9 +2664,10 @@ fn build_covered_call_view(
         }
 
         let max_sale_value_per_contract = strike_price_f64 * 100.0;
-        let max_profit_per_contract = ((strike_price_f64 - underlying_price_f64).max(0.0)
-            * 100.0)
-            + premium_per_contract;
+        let covered_call_breakeven = underlying_price_f64 - option_price_f64;
+        let max_profit_per_contract =
+            ((strike_price_f64 - underlying_price_f64).max(0.0) * 100.0) + premium_per_contract;
+        let max_loss_per_contract = (underlying_price_f64 * 100.0 - premium_per_contract).max(0.0);
 
         candidates.push(CoveredCallCandidate {
             option_symbol: row.option_symbol,
@@ -2630,12 +2679,13 @@ fn build_covered_call_view(
             delta: row.local_greeks.delta,
             theta_per_day: row.local_greeks.theta_per_day,
             otm_percent: row.diagnostics.otm_percent,
-            breakeven: row.diagnostics.breakeven,
+            breakeven: covered_call_breakeven,
             premium_per_contract,
             premium_yield_on_underlying,
             annualized_premium_yield,
             max_sale_value_per_contract,
             max_profit_per_contract,
+            max_loss_per_contract,
             fair_value,
             mispricing,
             mispricing_percent,
@@ -3263,6 +3313,8 @@ fn merge_sell_opportunities(
     diagonal_put_spreads: Option<DiagonalPutSpreadView>,
     strategy_filter: &[SellOpportunityStrategy],
     exclude_strategy_filter: &[SellOpportunityStrategy],
+    return_basis_filter: &[SellOpportunityReturnBasis],
+    exclude_return_basis_filter: &[SellOpportunityReturnBasis],
     min_premium_or_credit: Option<f64>,
     max_risk: Option<f64>,
     min_abs_mispricing_percent: Option<f64>,
@@ -3281,9 +3333,12 @@ fn merge_sell_opportunities(
             primary_symbol: row.option_symbol,
             secondary_symbol: None,
             annualized_return: row.annualized_return_on_cash,
+            return_basis: SellOpportunityReturnBasis::CollateralReturn,
+            annualized_return_note: None,
             premium_or_credit: row.premium_per_contract,
-            max_risk: row.cash_required_per_contract,
+            max_risk: (row.cash_required_per_contract - row.premium_per_contract).max(0.0),
             breakeven: row.breakeven,
+            breakeven_note: None,
             mispricing_percent: row.mispricing_percent,
             iv_diff_percent: row.iv_diff_percent,
         });
@@ -3295,9 +3350,12 @@ fn merge_sell_opportunities(
             primary_symbol: row.option_symbol,
             secondary_symbol: None,
             annualized_return: row.annualized_premium_yield,
+            return_basis: SellOpportunityReturnBasis::PremiumYield,
+            annualized_return_note: None,
             premium_or_credit: row.premium_per_contract,
-            max_risk: 0.0,
+            max_risk: row.max_loss_per_contract,
             breakeven: row.breakeven,
+            breakeven_note: None,
             mispricing_percent: row.mispricing_percent,
             iv_diff_percent: row.iv_diff_percent,
         });
@@ -3309,9 +3367,12 @@ fn merge_sell_opportunities(
             primary_symbol: row.short_option_symbol,
             secondary_symbol: Some(row.long_option_symbol),
             annualized_return: row.annualized_return_on_risk,
+            return_basis: SellOpportunityReturnBasis::MaxRiskReturn,
+            annualized_return_note: None,
             premium_or_credit: row.net_credit_per_spread,
             max_risk: row.max_loss_per_spread,
             breakeven: row.breakeven,
+            breakeven_note: None,
             mispricing_percent: row.short_mispricing_percent,
             iv_diff_percent: row.short_iv_diff_percent,
         });
@@ -3323,9 +3384,12 @@ fn merge_sell_opportunities(
             primary_symbol: row.short_option_symbol,
             secondary_symbol: Some(row.long_option_symbol),
             annualized_return: row.annualized_return_on_risk,
+            return_basis: SellOpportunityReturnBasis::MaxRiskReturn,
+            annualized_return_note: None,
             premium_or_credit: row.net_credit_per_spread,
             max_risk: row.max_loss_per_spread,
             breakeven: row.breakeven,
+            breakeven_note: None,
             mispricing_percent: row.short_mispricing_percent,
             iv_diff_percent: row.short_iv_diff_percent,
         });
@@ -3338,9 +3402,14 @@ fn merge_sell_opportunities(
                 primary_symbol: row.near_option_symbol,
                 secondary_symbol: Some(row.far_option_symbol),
                 annualized_return: row.annualized_theta_carry_return_on_debit,
+                return_basis: SellOpportunityReturnBasis::ThetaCarryRunRate,
+                annualized_return_note: Some(
+                    "current theta carry run-rate; not a realized hold-period return".to_string(),
+                ),
                 premium_or_credit: row.net_debit_per_spread,
                 max_risk: row.max_loss_per_spread,
                 breakeven: 0.0,
+                breakeven_note: Some("not modeled for cross-expiry structures".to_string()),
                 mispricing_percent: 0.0,
                 iv_diff_percent: 0.0,
             });
@@ -3354,9 +3423,14 @@ fn merge_sell_opportunities(
                 primary_symbol: row.near_option_symbol,
                 secondary_symbol: Some(row.far_option_symbol),
                 annualized_return: row.annualized_theta_carry_return_on_debit,
+                return_basis: SellOpportunityReturnBasis::ThetaCarryRunRate,
+                annualized_return_note: Some(
+                    "current theta carry run-rate; not a realized hold-period return".to_string(),
+                ),
                 premium_or_credit: row.net_debit_per_spread,
                 max_risk: row.max_loss_per_spread,
                 breakeven: 0.0,
+                breakeven_note: Some("not modeled for cross-expiry structures".to_string()),
                 mispricing_percent: 0.0,
                 iv_diff_percent: 0.0,
             });
@@ -3370,9 +3444,14 @@ fn merge_sell_opportunities(
                 primary_symbol: row.near_option_symbol,
                 secondary_symbol: Some(row.far_option_symbol),
                 annualized_return: row.annualized_theta_carry_return_on_debit,
+                return_basis: SellOpportunityReturnBasis::ThetaCarryRunRate,
+                annualized_return_note: Some(
+                    "current theta carry run-rate; not a realized hold-period return".to_string(),
+                ),
                 premium_or_credit: row.net_debit_per_spread,
                 max_risk: row.max_loss_per_spread,
                 breakeven: 0.0,
+                breakeven_note: Some("not modeled for cross-expiry structures".to_string()),
                 mispricing_percent: 0.0,
                 iv_diff_percent: 0.0,
             });
@@ -3386,9 +3465,14 @@ fn merge_sell_opportunities(
                 primary_symbol: row.near_option_symbol,
                 secondary_symbol: Some(row.far_option_symbol),
                 annualized_return: row.annualized_theta_carry_return_on_debit,
+                return_basis: SellOpportunityReturnBasis::ThetaCarryRunRate,
+                annualized_return_note: Some(
+                    "current theta carry run-rate; not a realized hold-period return".to_string(),
+                ),
                 premium_or_credit: row.net_debit_per_spread,
                 max_risk: row.max_loss_per_spread,
                 breakeven: 0.0,
+                breakeven_note: Some("not modeled for cross-expiry structures".to_string()),
                 mispricing_percent: 0.0,
                 iv_diff_percent: 0.0,
             });
@@ -3400,17 +3484,17 @@ fn merge_sell_opportunities(
             &candidate.strategy,
             strategy_filter,
             exclude_strategy_filter,
-        )
-            && min_premium_or_credit
-                .map(|min| candidate.premium_or_credit >= min)
-                .unwrap_or(true)
+        ) && should_include_sell_opportunity_return_basis(
+            candidate.return_basis,
+            return_basis_filter,
+            exclude_return_basis_filter,
+        ) && min_premium_or_credit
+            .map(|min| candidate.premium_or_credit >= min)
+            .unwrap_or(true)
             && max_risk
                 .map(|max| candidate.max_risk <= max)
                 .unwrap_or(true)
-            && matches_min_abs_threshold(
-                candidate.mispricing_percent,
-                min_abs_mispricing_percent,
-            )
+            && matches_min_abs_threshold(candidate.mispricing_percent, min_abs_mispricing_percent)
             && matches_min_abs_threshold(candidate.iv_diff_percent, min_abs_iv_diff_percent)
             && matches_range(
                 candidate.annualized_return,
@@ -3535,6 +3619,8 @@ mod tests {
 
         assert_eq!(view.candidates[0].option_symbol, "HIGH");
         assert_eq!(view.candidates[1].option_symbol, "LOW");
+        assert!((view.candidates[0].breakeven - 398.0).abs() < 0.0001);
+        assert!((view.candidates[0].max_loss_per_contract - 39_800.0).abs() < 0.0001);
     }
 
     #[test]
@@ -4121,12 +4207,13 @@ mod tests {
                     delta: 0.2,
                     theta_per_day: -0.01,
                     otm_percent: 0.05,
-                    breakeven: 401.5,
+                    breakeven: 398.5,
                     premium_per_contract: 150.0,
                     premium_yield_on_underlying: 0.00375,
                     annualized_premium_yield: 0.08,
                     max_sale_value_per_contract: 42000.0,
                     max_profit_per_contract: 2150.0,
+                    max_loss_per_contract: 39850.0,
                     fair_value: 1.0,
                     mispricing: 0.5,
                     mispricing_percent: 0.5,
@@ -4212,6 +4299,8 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
+            &[],
             None,
             None,
             None,
@@ -4229,6 +4318,189 @@ mod tests {
     }
 
     #[test]
+    fn merge_sell_opportunities_uses_true_max_loss_for_cash_secured_put() {
+        let view = merge_sell_opportunities(
+            CashSecuredPutView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![CashSecuredPutCandidate {
+                    option_symbol: "PUT1".to_string(),
+                    strike_price: "380".to_string(),
+                    option_price: "2.0".to_string(),
+                    implied_volatility: "0.3".to_string(),
+                    provider_reported_iv: "0.3".to_string(),
+                    days_to_expiry: 30,
+                    delta: -0.2,
+                    theta_per_day: -0.01,
+                    otm_percent: 0.05,
+                    breakeven: 378.0,
+                    premium_per_contract: 200.0,
+                    cash_required_per_contract: 38000.0,
+                    return_on_cash: 0.005,
+                    annualized_return_on_cash: 0.10,
+                    fair_value: 1.0,
+                    mispricing: 1.0,
+                    mispricing_percent: 1.0,
+                    solved_iv_from_market_price: 0.35,
+                    iv_diff: 0.05,
+                    iv_diff_percent: 0.1667,
+                    diagnostics: ContractDiagnostics::default(),
+                }],
+            },
+            CoveredCallView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            BullPutSpreadView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            BearCallSpreadView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(view.candidates.len(), 1);
+        assert_eq!(view.candidates[0].strategy, "cash_secured_put");
+        assert!((view.candidates[0].max_risk - 37_800.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn merge_sell_opportunities_marks_cross_expiry_breakeven_as_unmodeled() {
+        let view = merge_sell_opportunities(
+            CashSecuredPutView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            CoveredCallView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            BullPutSpreadView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            BearCallSpreadView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![],
+            },
+            Some(CalendarCallSpreadView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                near_expiry: "2026-03-20".to_string(),
+                far_expiry: "2026-04-17".to_string(),
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                candidates: vec![CalendarCallSpreadCandidate {
+                    near_option_symbol: "TSLA250320C00400000".to_string(),
+                    far_option_symbol: "TSLA250417C00400000".to_string(),
+                    strike_price: "400".to_string(),
+                    near_expiry: "2026-03-20".to_string(),
+                    far_expiry: "2026-04-17".to_string(),
+                    days_gap: 28,
+                    strike_gap: 0.0,
+                    near_option_price: "8.0".to_string(),
+                    far_option_price: "12.0".to_string(),
+                    net_debit_per_spread: 400.0,
+                    net_theta_carry_per_day: 5.0,
+                    theta_carry_return_on_debit_per_day: 0.0125,
+                    annualized_theta_carry_return_on_debit: 0.30,
+                    net_vega: 0.20,
+                    vega_to_debit_ratio: 0.0005,
+                    max_loss_per_spread: 400.0,
+                    near_diagnostics: ContractDiagnostics::default(),
+                    far_diagnostics: ContractDiagnostics::default(),
+                }],
+            }),
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(view.candidates.len(), 1);
+        assert_eq!(view.candidates[0].strategy, "calendar_call_spread");
+        assert_eq!(
+            view.candidates[0].annualized_return_note.as_deref(),
+            Some("current theta carry run-rate; not a realized hold-period return")
+        );
+        assert_eq!(view.candidates[0].breakeven, 0.0);
+        assert_eq!(
+            view.candidates[0].breakeven_note.as_deref(),
+            Some("not modeled for cross-expiry structures")
+        );
+    }
+
+    #[test]
     fn sorts_sell_opportunities_by_absolute_mispricing() {
         let mut candidates = vec![
             SellOpportunityCandidate {
@@ -4236,9 +4508,12 @@ mod tests {
                 primary_symbol: "LOW".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.30,
+                return_basis: SellOpportunityReturnBasis::PremiumYield,
+                annualized_return_note: None,
                 premium_or_credit: 100.0,
-                max_risk: 0.0,
+                max_risk: 39900.0,
                 breakeven: 401.0,
+                breakeven_note: None,
                 mispricing_percent: 0.10,
                 iv_diff_percent: 0.05,
             },
@@ -4247,9 +4522,12 @@ mod tests {
                 primary_symbol: "HIGH".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.10,
+                return_basis: SellOpportunityReturnBasis::CollateralReturn,
+                annualized_return_note: None,
                 premium_or_credit: 100.0,
                 max_risk: 10000.0,
                 breakeven: 390.0,
+                breakeven_note: None,
                 mispricing_percent: 0.40,
                 iv_diff_percent: 0.02,
             },
@@ -4258,6 +4536,50 @@ mod tests {
         sort_sell_opportunities(&mut candidates, Some(SellOpportunitySortField::Mispricing));
 
         assert_eq!(candidates[0].primary_symbol, "HIGH");
+    }
+
+    #[test]
+    fn annualized_sort_prioritizes_realized_return_over_run_rate_notes() {
+        let mut candidates = vec![
+            SellOpportunityCandidate {
+                strategy: "calendar_call_spread".to_string(),
+                primary_symbol: "RUNRATE".to_string(),
+                secondary_symbol: Some("FAR".to_string()),
+                annualized_return: 0.80,
+                return_basis: SellOpportunityReturnBasis::ThetaCarryRunRate,
+                annualized_return_note: Some(
+                    "current theta carry run-rate; not a realized hold-period return".to_string(),
+                ),
+                premium_or_credit: 200.0,
+                max_risk: 400.0,
+                breakeven: 0.0,
+                breakeven_note: Some("not modeled for cross-expiry structures".to_string()),
+                mispricing_percent: 0.0,
+                iv_diff_percent: 0.0,
+            },
+            SellOpportunityCandidate {
+                strategy: "covered_call".to_string(),
+                primary_symbol: "REALIZED".to_string(),
+                secondary_symbol: None,
+                annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::PremiumYield,
+                annualized_return_note: None,
+                premium_or_credit: 100.0,
+                max_risk: 39900.0,
+                breakeven: 401.0,
+                breakeven_note: None,
+                mispricing_percent: 0.10,
+                iv_diff_percent: 0.05,
+            },
+        ];
+
+        sort_sell_opportunities(
+            &mut candidates,
+            Some(SellOpportunitySortField::AnnualizedReturn),
+        );
+
+        assert_eq!(candidates[0].primary_symbol, "REALIZED");
+        assert_eq!(candidates[1].primary_symbol, "RUNRATE");
     }
 
     #[test]
@@ -4277,9 +4599,12 @@ mod tests {
                 primary_symbol: "LOW_PREMIUM".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::PremiumYield,
+                annualized_return_note: None,
                 premium_or_credit: 50.0,
-                max_risk: 0.0,
-                breakeven: 401.0,
+                max_risk: 39950.0,
+                breakeven: 399.5,
+                breakeven_note: None,
                 mispricing_percent: 0.10,
                 iv_diff_percent: 0.05,
             },
@@ -4288,9 +4613,12 @@ mod tests {
                 primary_symbol: "HIGH_RISK".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::CollateralReturn,
+                annualized_return_note: None,
                 premium_or_credit: 200.0,
                 max_risk: 20000.0,
                 breakeven: 390.0,
+                breakeven_note: None,
                 mispricing_percent: 0.10,
                 iv_diff_percent: 0.05,
             },
@@ -4299,9 +4627,12 @@ mod tests {
                 primary_symbol: "PASS".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::MaxRiskReturn,
+                annualized_return_note: None,
                 premium_or_credit: 150.0,
                 max_risk: 5000.0,
                 breakeven: 390.0,
+                breakeven_note: None,
                 mispricing_percent: 0.10,
                 iv_diff_percent: 0.05,
             },
@@ -4323,9 +4654,12 @@ mod tests {
                 primary_symbol: "LOW".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::PremiumYield,
+                annualized_return_note: None,
                 premium_or_credit: 100.0,
-                max_risk: 0.0,
+                max_risk: 39900.0,
                 breakeven: 401.0,
+                breakeven_note: None,
                 mispricing_percent: 0.05,
                 iv_diff_percent: 0.05,
             },
@@ -4334,9 +4668,12 @@ mod tests {
                 primary_symbol: "PASS".to_string(),
                 secondary_symbol: None,
                 annualized_return: 0.20,
+                return_basis: SellOpportunityReturnBasis::CollateralReturn,
+                annualized_return_note: None,
                 premium_or_credit: 100.0,
                 max_risk: 10000.0,
                 breakeven: 390.0,
+                breakeven_note: None,
                 mispricing_percent: 0.15,
                 iv_diff_percent: 0.20,
             },
@@ -4360,9 +4697,12 @@ mod tests {
                     primary_symbol: "CALL1".to_string(),
                     secondary_symbol: None,
                     annualized_return: 0.30,
+                    return_basis: SellOpportunityReturnBasis::PremiumYield,
+                    annualized_return_note: None,
                     premium_or_credit: 100.0,
-                    max_risk: 0.0,
+                    max_risk: 39900.0,
                     breakeven: 401.0,
+                    breakeven_note: None,
                     mispricing_percent: 0.10,
                     iv_diff_percent: 0.05,
                 },
@@ -4371,9 +4711,12 @@ mod tests {
                     primary_symbol: "CALL2".to_string(),
                     secondary_symbol: None,
                     annualized_return: 0.20,
+                    return_basis: SellOpportunityReturnBasis::PremiumYield,
+                    annualized_return_note: None,
                     premium_or_credit: 90.0,
-                    max_risk: 0.0,
+                    max_risk: 39910.0,
                     breakeven: 402.0,
+                    breakeven_note: None,
                     mispricing_percent: 0.08,
                     iv_diff_percent: 0.04,
                 },
@@ -4382,9 +4725,12 @@ mod tests {
                     primary_symbol: "PUT1".to_string(),
                     secondary_symbol: None,
                     annualized_return: 0.10,
+                    return_basis: SellOpportunityReturnBasis::CollateralReturn,
+                    annualized_return_note: None,
                     premium_or_credit: 120.0,
                     max_risk: 10000.0,
                     breakeven: 390.0,
+                    breakeven_note: None,
                     mispricing_percent: 0.12,
                     iv_diff_percent: 0.06,
                 },
@@ -4407,10 +4753,7 @@ mod tests {
             "covered_call",
             &[SellOpportunityStrategy::CashSecuredPut],
         ));
-        assert!(matches_sell_opportunity_strategy(
-            "covered_call",
-            &[],
-        ));
+        assert!(matches_sell_opportunity_strategy("covered_call", &[],));
     }
 
     #[test]
@@ -4429,6 +4772,25 @@ mod tests {
             "covered_call",
             &[SellOpportunityStrategy::CoveredCall],
             &[SellOpportunityStrategy::CoveredCall],
+        ));
+    }
+
+    #[test]
+    fn filters_sell_opportunities_by_return_basis() {
+        assert!(should_include_sell_opportunity_return_basis(
+            SellOpportunityReturnBasis::PremiumYield,
+            &[SellOpportunityReturnBasis::PremiumYield],
+            &[],
+        ));
+        assert!(!should_include_sell_opportunity_return_basis(
+            SellOpportunityReturnBasis::ThetaCarryRunRate,
+            &[SellOpportunityReturnBasis::PremiumYield],
+            &[],
+        ));
+        assert!(!should_include_sell_opportunity_return_basis(
+            SellOpportunityReturnBasis::ThetaCarryRunRate,
+            &[],
+            &[SellOpportunityReturnBasis::ThetaCarryRunRate],
         ));
     }
 
@@ -4493,10 +4855,22 @@ mod tests {
 
     #[test]
     fn filters_mispricing_by_iv_direction() {
-        assert!(matches_iv_diff_direction(0.1, Some(IvDiffDirection::Higher)));
-        assert!(!matches_iv_diff_direction(-0.1, Some(IvDiffDirection::Higher)));
-        assert!(matches_iv_diff_direction(-0.1, Some(IvDiffDirection::Lower)));
-        assert!(!matches_iv_diff_direction(0.1, Some(IvDiffDirection::Lower)));
+        assert!(matches_iv_diff_direction(
+            0.1,
+            Some(IvDiffDirection::Higher)
+        ));
+        assert!(!matches_iv_diff_direction(
+            -0.1,
+            Some(IvDiffDirection::Higher)
+        ));
+        assert!(matches_iv_diff_direction(
+            -0.1,
+            Some(IvDiffDirection::Lower)
+        ));
+        assert!(!matches_iv_diff_direction(
+            0.1,
+            Some(IvDiffDirection::Lower)
+        ));
     }
 
     #[test]
@@ -4561,18 +4935,7 @@ mod tests {
         direction: Option<MispricingDirection>,
     ) -> Result<CashSecuredPutView> {
         build_cash_secured_put_view(
-            analysis,
-            0.0,
-            direction,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            analysis, 0.0, direction, None, None, None, None, None, None, None, None, None,
         )
     }
 

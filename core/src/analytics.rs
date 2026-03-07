@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::f64::consts::{PI, SQRT_2};
@@ -184,9 +184,7 @@ pub fn implied_volatility_from_price(
     )?);
 
     if target_price < low_price || target_price > high_price {
-        bail!(
-            "target_price is outside solvable range for current model assumptions"
-        );
+        bail!("target_price is outside solvable range for current model assumptions");
     }
 
     for _ in 0..IV_MAX_ITERATIONS {
@@ -244,8 +242,7 @@ fn erf(x: f64) -> f64 {
     let p = 0.327_591_1;
 
     let t = 1.0 / (1.0 + p * x);
-    let y = 1.0
-        - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * (-(x * x)).exp());
+    let y = 1.0 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * (-(x * x)).exp());
 
     sign * y
 }
@@ -291,7 +288,10 @@ mod tests {
         let batch = calculate_metrics_batch(&inputs);
 
         assert_eq!(batch.len(), inputs.len());
-        assert_eq!(batch[0].fair_value, calculate_metrics(&inputs[0]).fair_value);
+        assert_eq!(
+            batch[0].fair_value,
+            calculate_metrics(&inputs[0]).fair_value
+        );
         assert_eq!(batch[1].delta, calculate_metrics(&inputs[1]).delta);
     }
 

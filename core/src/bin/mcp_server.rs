@@ -1,24 +1,23 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use rust_mcp_sdk::{
+    McpServer, StdioTransport, ToMcpServerHandler, TransportOptions,
     error::SdkResult,
     macros::{self, mcp_tool},
-    mcp_server::{server_runtime, McpServerOptions, ServerHandler},
+    mcp_server::{McpServerOptions, ServerHandler, server_runtime},
     schema::*,
-    StdioTransport, TransportOptions,
-    McpServer, ToMcpServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
 use theta::ledger::{AccountSnapshot, Ledger, Position};
+use theta::margin_engine::{self, AccountContext};
 use theta::portfolio_service;
 use theta::risk_engine;
-use theta::margin_engine::{self, AccountContext};
 use theta::signal_service::{
-    MarketToneRequest, ThetaSignalService, SkewSignalRequest, TermStructureRequest,
-    SmileSignalRequest, PutCallBiasRequest,
+    MarketToneRequest, PutCallBiasRequest, SkewSignalRequest, SmileSignalRequest,
+    TermStructureRequest, ThetaSignalService,
 };
 use theta::snapshot_store::SignalSnapshotStore;
 
@@ -159,7 +158,10 @@ struct ThetaHandler {
 }
 
 impl ThetaHandler {
-    fn parse_args<T: serde::de::DeserializeOwned>(&self, args: Option<serde_json::Map<String, Value>>) -> Result<T, CallToolError> {
+    fn parse_args<T: serde::de::DeserializeOwned>(
+        &self,
+        args: Option<serde_json::Map<String, Value>>,
+    ) -> Result<T, CallToolError> {
         serde_json::from_value(Value::Object(args.unwrap_or_default()))
             .map_err(|e| CallToolError::from_message(format!("Invalid arguments: {}", e)))
     }
@@ -199,29 +201,41 @@ impl ServerHandler for ThetaHandler {
         match params.name.as_str() {
             "get_stock_quote" => {
                 let args: GetStockQuoteArgs = self.parse_args(params.arguments)?;
-                
+
                 match s.service.stock_quote(&args.symbol).await {
                     Ok(quote) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&quote).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&quote)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_market_tone" => {
                 let args: GetMarketToneArgs = self.parse_args(params.arguments)?;
-                
+
                 let symbol = args.symbol.clone();
                 let expiries_limit = args.expiries_limit.unwrap_or(4) as usize;
-                
+
                 let expiry = if let Some(dt) = args.expiry {
                     match theta::market_data::parse_expiry_date(&dt) {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error parsing expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 } else {
                     match s.service.front_expiry_for_symbol(&symbol).await {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error fetching front expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 };
 
@@ -241,36 +255,53 @@ impl ServerHandler for ThetaHandler {
 
                 match s.service.market_tone(tone_req).await {
                     Ok(view) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&view).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&view)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_signal_history" => {
                 let args: GetSignalHistoryArgs = self.parse_args(params.arguments)?;
-                
+
                 let limit = args.limit.unwrap_or(20) as usize;
-                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
+                let store = SignalSnapshotStore::open(&s.db_path)
+                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
                 match store.list_market_tone_snapshots(args.symbol.as_deref(), limit) {
                     Ok(snapshots) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&snapshots).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&snapshots)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_skew" => {
                 let args: GetSkewArgs = self.parse_args(params.arguments)?;
-                
+
                 let symbol = args.symbol.clone();
                 let expiry_date = if let Some(dt) = args.expiry {
                     match theta::market_data::parse_expiry_date(&dt) {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error parsing expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 } else {
                     match s.service.front_expiry_for_symbol(&symbol).await {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error fetching front expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 };
 
@@ -287,24 +318,36 @@ impl ServerHandler for ThetaHandler {
 
                 match s.service.skew(skew_req).await {
                     Ok(skew) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&skew).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&skew)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_smile" => {
                 let args: GetSmileArgs = self.parse_args(params.arguments)?;
-                
+
                 let symbol = args.symbol.clone();
                 let expiry_date = if let Some(dt) = args.expiry {
                     match theta::market_data::parse_expiry_date(&dt) {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error parsing expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 } else {
                     match s.service.front_expiry_for_symbol(&symbol).await {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error fetching front expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 };
 
@@ -320,14 +363,18 @@ impl ServerHandler for ThetaHandler {
 
                 match s.service.smile(smile_req).await {
                     Ok(smile) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&smile).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&smile)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_term_structure" => {
                 let args: GetTermStructureArgs = self.parse_args(params.arguments)?;
-                
+
                 let ts_req = TermStructureRequest {
                     symbol: args.symbol.clone(),
                     expiries_limit: args.expiries_limit.unwrap_or(4) as usize,
@@ -341,22 +388,32 @@ impl ServerHandler for ThetaHandler {
                     Ok(ts) => Ok(CallToolResult::text_content(vec![
                         serde_json::to_string_pretty(&ts).unwrap_or_default().into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_put_call_bias" => {
                 let args: GetPutCallBiasArgs = self.parse_args(params.arguments)?;
-                
+
                 let symbol = args.symbol.clone();
                 let expiry_date = if let Some(dt) = args.expiry {
                     match theta::market_data::parse_expiry_date(&dt) {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error parsing expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error parsing expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 } else {
                     match s.service.front_expiry_for_symbol(&symbol).await {
                         Ok(exp) => exp,
-                        Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error fetching front expiry: {}", e).into()])),
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error fetching front expiry: {}", e).into(),
+                            ]));
+                        }
                     }
                 };
 
@@ -372,18 +429,25 @@ impl ServerHandler for ThetaHandler {
 
                 match s.service.put_call_bias(bias_req).await {
                     Ok(bias) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&bias).unwrap_or_default().into(),
+                        serde_json::to_string_pretty(&bias)
+                            .unwrap_or_default()
+                            .into(),
                     ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![format!("Error: {}", e).into()])),
+                    Err(e) => Ok(CallToolResult::text_content(vec![
+                        format!("Error: {}", e).into(),
+                    ])),
                 }
             }
             "get_market_extreme" => {
                 let args: GetMarketExtremeArgs = self.parse_args(params.arguments)?;
-                
+
                 let limit = args.limit.unwrap_or(20) as usize;
-                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
-                
-                let symbols = store.list_symbols().map_err(|e| CallToolError::from_message(e.to_string()))?;
+                let store = SignalSnapshotStore::open(&s.db_path)
+                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
+
+                let symbols = store
+                    .list_symbols()
+                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
                 let mut results = Vec::new();
                 for symbol in symbols {
                     if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
@@ -392,51 +456,75 @@ impl ServerHandler for ThetaHandler {
                 }
 
                 Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&results).unwrap_or_default().into(),
+                    serde_json::to_string_pretty(&results)
+                        .unwrap_or_default()
+                        .into(),
                 ]))
             }
             "get_relative_extreme" => {
                 let args: GetRelativeExtremeArgs = self.parse_args(params.arguments)?;
-                
+
                 let limit = args.limit.unwrap_or(20) as usize;
-                let store = SignalSnapshotStore::open(&s.db_path).map_err(|e| CallToolError::from_message(e.to_string()))?;
-                
-                let symbols = store.list_symbols().map_err(|e| CallToolError::from_message(e.to_string()))?;
+                let store = SignalSnapshotStore::open(&s.db_path)
+                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
+
+                let symbols = store
+                    .list_symbols()
+                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
                 let mut results = Vec::new();
                 for symbol in symbols {
                     if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
                         if let Some(z) = row.front_atm_iv.z_score {
-                             if z.abs() >= 2.0 {
-                                 results.push(row);
-                             }
+                            if z.abs() >= 2.0 {
+                                results.push(row);
+                            }
                         }
                     }
                 }
 
                 Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&results).unwrap_or_default().into(),
+                    serde_json::to_string_pretty(&results)
+                        .unwrap_or_default()
+                        .into(),
                 ]))
             }
             "get_portfolio" => {
                 let args: GetPortfolioArgs = self.parse_args(params.arguments)?;
-                
-                // Determine ledger db path based on account arg
-                let account_name = args.account.as_deref().unwrap_or("firstrade").to_lowercase();
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                let ledger_db_path = std::path::PathBuf::from(&home).join(".theta").join("portfolio.db");
 
-                let ledger = Ledger::open(&ledger_db_path).map_err(|e| CallToolError::from_message(format!("Failed to open ledger at {:?}: {}", ledger_db_path, e)))?; 
-                
-                let positions: Vec<Position> = match ledger.calculate_positions(&account_name, None) {
+                // Determine ledger db path based on account arg
+                let account_name = args
+                    .account
+                    .as_deref()
+                    .unwrap_or("firstrade")
+                    .to_lowercase();
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+                let ledger_db_path = std::path::PathBuf::from(&home)
+                    .join(".theta")
+                    .join("portfolio.db");
+
+                let ledger = Ledger::open(&ledger_db_path).map_err(|e| {
+                    CallToolError::from_message(format!(
+                        "Failed to open ledger at {:?}: {}",
+                        ledger_db_path, e
+                    ))
+                })?;
+
+                let positions: Vec<Position> = match ledger.calculate_positions(&account_name, None)
+                {
                     Ok(p) => p,
-                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error loading positions: {}", e).into()])),
+                    Err(e) => {
+                        return Ok(CallToolResult::text_content(vec![
+                            format!("Error loading positions: {}", e).into(),
+                        ]));
+                    }
                 };
-                
+
                 let account_snapshot = match ledger.latest_account_snapshot(&account_name) {
                     Ok(Some(a)) => a,
                     _ => AccountSnapshot {
                         id: 0,
                         snapshot_at: "".to_string(),
+                        baseline_trade_id: None,
                         trade_date_cash: 100000.0,
                         settled_cash: 100000.0,
                         option_buying_power: None,
@@ -446,9 +534,9 @@ impl ServerHandler for ThetaHandler {
                         margin_enabled: true,
                         notes: "dummy snapshot".to_string(),
                         account_id: account_name,
-                    }
+                    },
                 };
-                
+
                 let account = AccountContext {
                     trade_date_cash: Some(account_snapshot.trade_date_cash),
                     settled_cash: Some(account_snapshot.settled_cash),
@@ -458,21 +546,30 @@ impl ServerHandler for ThetaHandler {
                     short_market_value: account_snapshot.short_market_value,
                     margin_enabled: account_snapshot.margin_enabled,
                 };
-                
+
                 let analysis_service = self.state.service.analysis();
-                
-                let enriched = match portfolio_service::enrich_positions(analysis_service, &positions).await {
-                    Ok(e) => e,
-                    Err(e) => return Ok(CallToolResult::text_content(vec![format!("Error enriching positions: {}", e).into()])),
-                };
-                
+
+                let enriched =
+                    match portfolio_service::enrich_positions(analysis_service, &positions).await {
+                        Ok(e) => e,
+                        Err(e) => {
+                            return Ok(CallToolResult::text_content(vec![
+                                format!("Error enriching positions: {}", e).into(),
+                            ]));
+                        }
+                    };
+
                 let strategies = risk_engine::identify_strategies(&positions);
-                let evaluated_strategies = margin_engine::evaluate_strategies(&strategies, &enriched, &account);
+                let evaluated_strategies =
+                    margin_engine::evaluate_strategies(&strategies, &enriched, &account);
                 let portfolio_greeks = risk_engine::aggregate_greeks(&enriched);
-                
-                let total_margin: f64 = evaluated_strategies.iter().map(|s| s.margin.margin_required).sum();
+
+                let total_margin: f64 = evaluated_strategies
+                    .iter()
+                    .map(|s| s.margin.margin_required)
+                    .sum();
                 let unrealized_pnl: f64 = enriched.iter().map(|p| p.unrealized_pnl).sum();
-                
+
                 let report = serde_json::json!({
                     "account": account_snapshot,
                     "positions_count": enriched.len(),
@@ -482,9 +579,11 @@ impl ServerHandler for ThetaHandler {
                     "strategies": evaluated_strategies,
                     "enriched_positions": enriched,
                 });
-                
+
                 Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&report).unwrap_or_default().into(),
+                    serde_json::to_string_pretty(&report)
+                        .unwrap_or_default()
+                        .into(),
                 ]))
             }
             _ => Err(CallToolError::unknown_tool(params.name)),
@@ -496,7 +595,9 @@ impl ServerHandler for ThetaHandler {
 
 fn default_db_path() -> Result<std::path::PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    Ok(std::path::PathBuf::from(home).join(".theta").join("signals.db"))
+    Ok(std::path::PathBuf::from(home)
+        .join(".theta")
+        .join("signals.db"))
 }
 
 #[tokio::main]
@@ -509,7 +610,7 @@ async fn main() -> SdkResult<()> {
     // Attempt to load environment from standard config paths
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let config_dir = std::path::PathBuf::from(home).join(".config").join("theta");
-    
+
     // Try config.env first, then capture-signals.env
     let config_paths = [
         config_dir.join("config.env"),
@@ -536,22 +637,29 @@ async fn main() -> SdkResult<()> {
     tracing::info!("Initializing ThetaSignalService (with 30s timeout)...");
     let service_result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        ThetaSignalService::from_env()
-    ).await;
+        ThetaSignalService::from_env(),
+    )
+    .await;
 
     let service = match service_result {
         Ok(Ok(s)) => Arc::new(s),
         Ok(Err(e)) => {
             tracing::error!("Failed to initialize ThetaSignalService: {}", e);
-            return Err(rust_mcp_sdk::error::McpSdkError::Internal { description: format!("Service init failed: {}", e) });
+            return Err(rust_mcp_sdk::error::McpSdkError::Internal {
+                description: format!("Service init failed: {}", e),
+            });
         }
         Err(_) => {
             tracing::error!("Timeout (30s) reached while initializing ThetaSignalService.");
-            return Err(rust_mcp_sdk::error::McpSdkError::Internal { description: "Service initialization timed out".to_string() });
+            return Err(rust_mcp_sdk::error::McpSdkError::Internal {
+                description: "Service initialization timed out".to_string(),
+            });
         }
     };
 
-    let db_path = default_db_path().map_err(|e| rust_mcp_sdk::error::McpSdkError::Internal { description: e.to_string() })?;
+    let db_path = default_db_path().map_err(|e| rust_mcp_sdk::error::McpSdkError::Internal {
+        description: e.to_string(),
+    })?;
     let state = Arc::new(ThetaServerState { service, db_path });
 
     let server_details = InitializeResult {
@@ -563,20 +671,23 @@ async fn main() -> SdkResult<()> {
             icons: vec![],
             website_url: None,
         },
-        capabilities: ServerCapabilities { 
-            tools: Some(ServerCapabilitiesTools { list_changed: None }), 
-            ..Default::default() 
+        capabilities: ServerCapabilities {
+            tools: Some(ServerCapabilitiesTools { list_changed: None }),
+            ..Default::default()
         },
         protocol_version: ProtocolVersion::V2025_06_18.into(),
         instructions: None,
-        meta: None
+        meta: None,
     };
 
-    let transport = StdioTransport::new(TransportOptions::default())
-        .map_err(|e| rust_mcp_sdk::error::McpSdkError::Internal { description: e.to_string() })?;
-    
+    let transport = StdioTransport::new(TransportOptions::default()).map_err(|e| {
+        rust_mcp_sdk::error::McpSdkError::Internal {
+            description: e.to_string(),
+        }
+    })?;
+
     let handler = ThetaHandler { state }.to_mcp_server_handler();
-    
+
     let server = server_runtime::create_server(McpServerOptions {
         transport,
         handler,

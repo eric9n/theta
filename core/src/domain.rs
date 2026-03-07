@@ -1,4 +1,5 @@
 use crate::analytics::{ContractSide, OptionMetrics};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use time::Date;
@@ -361,6 +362,7 @@ pub struct CoveredCallCandidate {
     pub annualized_premium_yield: f64,
     pub max_sale_value_per_contract: f64,
     pub max_profit_per_contract: f64,
+    pub max_loss_per_contract: f64,
     pub fair_value: f64,
     pub mispricing: f64,
     pub mispricing_percent: f64,
@@ -661,15 +663,41 @@ pub struct DiagonalPutSpreadView {
     pub candidates: Vec<DiagonalPutSpreadCandidate>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum SellOpportunityReturnBasis {
+    CollateralReturn,
+    PremiumYield,
+    MaxRiskReturn,
+    ThetaCarryRunRate,
+}
+
+impl std::fmt::Display for SellOpportunityReturnBasis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            SellOpportunityReturnBasis::CollateralReturn => "collateral_return",
+            SellOpportunityReturnBasis::PremiumYield => "premium_yield",
+            SellOpportunityReturnBasis::MaxRiskReturn => "max_risk_return",
+            SellOpportunityReturnBasis::ThetaCarryRunRate => "theta_carry_run_rate",
+        };
+        write!(f, "{}", label)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SellOpportunityCandidate {
     pub strategy: String,
     pub primary_symbol: String,
     pub secondary_symbol: Option<String>,
     pub annualized_return: f64,
+    pub return_basis: SellOpportunityReturnBasis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annualized_return_note: Option<String>,
     pub premium_or_credit: f64,
     pub max_risk: f64,
     pub breakeven: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakeven_note: Option<String>,
     pub mispricing_percent: f64,
     pub iv_diff_percent: f64,
 }

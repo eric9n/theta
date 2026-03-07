@@ -58,6 +58,8 @@ pub struct AccountSnapshot {
     pub id: i64,
     /// ISO8601 timestamp
     pub snapshot_at: String,
+    /// Highest trade id already reflected in this snapshot, if known
+    pub baseline_trade_id: Option<i64>,
     pub trade_date_cash: f64,
     pub settled_cash: f64,
     pub option_buying_power: Option<f64>,
@@ -74,6 +76,31 @@ pub struct AccountMonitorSnapshotInput {
     pub captured_at: String,
     pub account_id: String,
     pub status: String,
+    pub data_quality: String,
+    pub error_message: Option<String>,
+    pub trade_date_cash: Option<f64>,
+    pub settled_cash: Option<f64>,
+    pub margin_loan: Option<f64>,
+    pub option_buying_power: Option<f64>,
+    pub positions_count: Option<i64>,
+    pub position_market_value: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub total_margin_required: Option<f64>,
+    pub net_delta_shares: Option<f64>,
+    pub total_gamma: Option<f64>,
+    pub total_theta_per_day: Option<f64>,
+    pub total_vega: Option<f64>,
+    pub equity_estimate: Option<f64>,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountMonitorSnapshot {
+    pub id: i64,
+    pub captured_at: String,
+    pub account_id: String,
+    pub status: String,
+    pub data_quality: String,
     pub error_message: Option<String>,
     pub trade_date_cash: Option<f64>,
     pub settled_cash: Option<f64>,
@@ -162,6 +189,7 @@ impl Ledger {
             CREATE TABLE IF NOT EXISTS account_snapshots (
                 id                  INTEGER PRIMARY KEY,
                 snapshot_at         TEXT    NOT NULL,
+                baseline_trade_id   INTEGER,
                 trade_date_cash     REAL    NOT NULL,
                 settled_cash        REAL    NOT NULL,
                 option_buying_power REAL,
@@ -183,6 +211,7 @@ impl Ledger {
                 captured_at           TEXT    NOT NULL,
                 account_id            TEXT    NOT NULL,
                 status                TEXT    NOT NULL,
+                data_quality          TEXT    NOT NULL DEFAULT 'unknown',
                 error_message         TEXT,
                 trade_date_cash       REAL,
                 settled_cash          REAL,
@@ -205,6 +234,8 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS idx_account_monitor_snapshots_account
                 ON account_monitor_snapshots(account_id, captured_at);",
         )?;
+        self.ensure_account_snapshots_columns()?;
+        self.ensure_account_monitor_snapshot_columns()?;
         Ok(())
     }
 
@@ -247,19 +278,8 @@ impl Ledger {
         account_id: &str,
     ) -> Result<i64> {
         self.record_trade_internal(
-            trade_date,
-            symbol,
-            underlying,
-            side,
-            strike,
-            expiry,
-            action,
-            quantity,
-            price,
-            commission,
-            notes,
-            account_id,
-            false,
+            trade_date, symbol, underlying, side, strike, expiry, action, quantity, price,
+            commission, notes, account_id, false,
         )
     }
 
@@ -279,19 +299,8 @@ impl Ledger {
         account_id: &str,
     ) -> Result<i64> {
         self.record_trade_internal(
-            trade_date,
-            symbol,
-            underlying,
-            side,
-            strike,
-            expiry,
-            action,
-            quantity,
-            price,
-            commission,
-            notes,
-            account_id,
-            true,
+            trade_date, symbol, underlying, side, strike, expiry, action, quantity, price,
+            commission, notes, account_id, true,
         )
     }
 
@@ -311,8 +320,14 @@ impl Ledger {
         account_id: &str,
         allow_zero_price: bool,
     ) -> Result<i64> {
-        ensure!(matches!(side, "call" | "put" | "stock"), "invalid side: {side}");
-        ensure!(matches!(action, "buy" | "sell" | "deposit" | "withdraw" | "dividend"), "invalid action: {action}");
+        ensure!(
+            matches!(side, "call" | "put" | "stock"),
+            "invalid side: {side}"
+        );
+        ensure!(
+            matches!(action, "buy" | "sell" | "deposit" | "withdraw" | "dividend"),
+            "invalid action: {action}"
+        );
         ensure!(quantity > 0, "quantity must be positive");
         if allow_zero_price {
             ensure!(price >= 0.0, "price must be non-negative");
@@ -331,10 +346,9 @@ impl Ledger {
 
     /// Delete a trade by id. Returns true if a row was deleted.
     pub fn delete_trade(&self, id: i64) -> Result<bool> {
-        let affected = self.conn.execute(
-            "DELETE FROM trades WHERE id = ?1",
-            params![id],
-        )?;
+        let affected = self
+            .conn
+            .execute("DELETE FROM trades WHERE id = ?1", params![id])?;
         Ok(affected > 0)
     }
 
@@ -351,11 +365,13 @@ impl Ledger {
         notes: &str,
         account_id: &str,
     ) -> Result<i64> {
+        let baseline_trade_id = self.latest_trade_id(account_id)?;
         self.conn.execute(
-            "INSERT INTO account_snapshots (snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO account_snapshots (snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 snapshot_at,
+                baseline_trade_id,
                 trade_date_cash,
                 settled_cash,
                 option_buying_power,
@@ -387,19 +403,28 @@ impl Ledger {
             "invalid status: {}",
             input.status
         );
+        ensure!(
+            matches!(
+                input.data_quality.as_str(),
+                "complete" | "incomplete_quotes" | "quote_unavailable" | "system_error" | "unknown"
+            ),
+            "invalid data_quality: {}",
+            input.data_quality
+        );
 
         self.conn.execute(
             "INSERT INTO account_monitor_snapshots (
-                captured_at, account_id, status, error_message,
+                captured_at, account_id, status, data_quality, error_message,
                 trade_date_cash, settled_cash, margin_loan, option_buying_power,
                 positions_count, position_market_value, unrealized_pnl,
                 total_margin_required, net_delta_shares, total_gamma,
                 total_theta_per_day, total_vega, equity_estimate, notes
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &input.captured_at,
                 &input.account_id,
                 &input.status,
+                &input.data_quality,
                 &input.error_message,
                 input.trade_date_cash,
                 input.settled_cash,
@@ -426,7 +451,9 @@ impl Ledger {
 
     /// List trades with optional filters.
     pub fn list_trades(&self, filter: &TradeFilter) -> Result<Vec<Trade>> {
-        let mut sql = String::from("SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id FROM trades WHERE 1=1");
+        let mut sql = String::from(
+            "SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id FROM trades WHERE 1=1",
+        );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(ref underlying) = filter.underlying {
@@ -482,7 +509,11 @@ impl Ledger {
 
     /// Compute current positions by aggregating all trades.
     /// Buy adds to position, sell subtracts. Returns only non-zero positions.
-    pub fn calculate_positions(&self, account_id: &str, underlying_filter: Option<&str>) -> Result<Vec<Position>> {
+    pub fn calculate_positions(
+        &self,
+        account_id: &str,
+        underlying_filter: Option<&str>,
+    ) -> Result<Vec<Position>> {
         let trades = self.list_trades(&TradeFilter {
             underlying: underlying_filter.map(String::from),
             account_id: Some(account_id.to_string()),
@@ -538,7 +569,8 @@ impl Ledger {
 
             let closing_quantity = trade_quantity_abs.min(entry.net_quantity.unsigned_abs() as i64);
             if closing_quantity > 0 {
-                let avg_open_cost = entry.open_cost_total / entry.net_quantity.unsigned_abs() as f64;
+                let avg_open_cost =
+                    entry.open_cost_total / entry.net_quantity.unsigned_abs() as f64;
                 entry.net_quantity += trade_direction * closing_quantity;
                 entry.open_cost_total -= avg_open_cost * closing_quantity as f64;
                 if entry.net_quantity == 0 {
@@ -548,8 +580,8 @@ impl Ledger {
 
             let opening_remainder = trade_quantity_abs - closing_quantity;
             if opening_remainder > 0 {
-                let opening_commission = t.commission
-                    * (opening_remainder as f64 / trade_quantity_abs as f64);
+                let opening_commission =
+                    t.commission * (opening_remainder as f64 / trade_quantity_abs as f64);
                 apply_open_trade(
                     entry,
                     trade_direction,
@@ -617,7 +649,7 @@ impl Ledger {
 
     pub fn latest_account_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots 
              WHERE account_id = ?
              ORDER BY snapshot_at DESC, id DESC LIMIT 1",
@@ -626,15 +658,16 @@ impl Ledger {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
-                trade_date_cash: row.get(2)?,
-                settled_cash: row.get(3)?,
-                option_buying_power: row.get(4)?,
-                stock_buying_power: row.get(5)?,
-                margin_loan: row.get(6)?,
-                short_market_value: row.get(7)?,
-                margin_enabled: row.get(8)?,
-                notes: row.get(9)?,
-                account_id: row.get(10)?,
+                baseline_trade_id: row.get(2)?,
+                trade_date_cash: row.get(3)?,
+                settled_cash: row.get(4)?,
+                option_buying_power: row.get(5)?,
+                stock_buying_power: row.get(6)?,
+                margin_loan: row.get(7)?,
+                short_market_value: row.get(8)?,
+                margin_enabled: row.get(9)?,
+                notes: row.get(10)?,
+                account_id: row.get(11)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -644,7 +677,7 @@ impl Ledger {
     /// This is used as a checkpoint/baseline for balance derivation.
     pub fn latest_manual_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots 
              WHERE notes NOT LIKE 'auto-update%' AND account_id = ?
              ORDER BY snapshot_at DESC, id DESC LIMIT 1",
@@ -653,15 +686,16 @@ impl Ledger {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
-                trade_date_cash: row.get(2)?,
-                settled_cash: row.get(3)?,
-                option_buying_power: row.get(4)?,
-                stock_buying_power: row.get(5)?,
-                margin_loan: row.get(6)?,
-                short_market_value: row.get(7)?,
-                margin_enabled: row.get(8)?,
-                notes: row.get(9)?,
-                account_id: row.get(10)?,
+                baseline_trade_id: row.get(2)?,
+                trade_date_cash: row.get(3)?,
+                settled_cash: row.get(4)?,
+                option_buying_power: row.get(5)?,
+                stock_buying_power: row.get(6)?,
+                margin_loan: row.get(7)?,
+                short_market_value: row.get(8)?,
+                margin_enabled: row.get(9)?,
+                notes: row.get(10)?,
+                account_id: row.get(11)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -669,7 +703,7 @@ impl Ledger {
 
     pub fn list_account_snapshots(&self, account_id: &str) -> Result<Vec<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots
              WHERE account_id = ?
              ORDER BY snapshot_at DESC, id DESC",
@@ -678,15 +712,16 @@ impl Ledger {
             Ok(AccountSnapshot {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
-                trade_date_cash: row.get(2)?,
-                settled_cash: row.get(3)?,
-                option_buying_power: row.get(4)?,
-                stock_buying_power: row.get(5)?,
-                margin_loan: row.get(6)?,
-                short_market_value: row.get(7)?,
-                margin_enabled: row.get(8)?,
-                notes: row.get(9)?,
-                account_id: row.get(10)?,
+                baseline_trade_id: row.get(2)?,
+                trade_date_cash: row.get(3)?,
+                settled_cash: row.get(4)?,
+                option_buying_power: row.get(5)?,
+                stock_buying_power: row.get(6)?,
+                margin_loan: row.get(7)?,
+                short_market_value: row.get(8)?,
+                margin_enabled: row.get(9)?,
+                notes: row.get(10)?,
+                account_id: row.get(11)?,
             })
         })?;
 
@@ -695,6 +730,107 @@ impl Ledger {
             snapshots.push(row?);
         }
         Ok(snapshots)
+    }
+
+    pub fn list_account_monitor_snapshots(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AccountMonitorSnapshot>> {
+        let limit = i64::try_from(limit).context("monitor snapshot limit is too large")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, captured_at, account_id, status, data_quality, error_message,
+                    trade_date_cash, settled_cash, margin_loan, option_buying_power,
+                    positions_count, position_market_value, unrealized_pnl,
+                    total_margin_required, net_delta_shares, total_gamma,
+                    total_theta_per_day, total_vega, equity_estimate, notes
+             FROM account_monitor_snapshots
+             WHERE account_id = ?1
+             ORDER BY captured_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![account_id, limit], |row| {
+            Ok(AccountMonitorSnapshot {
+                id: row.get(0)?,
+                captured_at: row.get(1)?,
+                account_id: row.get(2)?,
+                status: row.get(3)?,
+                data_quality: row.get(4)?,
+                error_message: row.get(5)?,
+                trade_date_cash: row.get(6)?,
+                settled_cash: row.get(7)?,
+                margin_loan: row.get(8)?,
+                option_buying_power: row.get(9)?,
+                positions_count: row.get(10)?,
+                position_market_value: row.get(11)?,
+                unrealized_pnl: row.get(12)?,
+                total_margin_required: row.get(13)?,
+                net_delta_shares: row.get(14)?,
+                total_gamma: row.get(15)?,
+                total_theta_per_day: row.get(16)?,
+                total_vega: row.get(17)?,
+                equity_estimate: row.get(18)?,
+                notes: row.get(19)?,
+            })
+        })?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    fn ensure_account_snapshots_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(account_snapshots)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_baseline_trade_id = false;
+        for column in columns {
+            if column? == "baseline_trade_id" {
+                has_baseline_trade_id = true;
+                break;
+            }
+        }
+
+        if !has_baseline_trade_id {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN baseline_trade_id INTEGER",
+                [],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_account_monitor_snapshot_columns(&self) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("PRAGMA table_info(account_monitor_snapshots)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut has_data_quality = false;
+        for column in columns {
+            if column? == "data_quality" {
+                has_data_quality = true;
+                break;
+            }
+        }
+
+        if !has_data_quality {
+            self.conn.execute(
+                "ALTER TABLE account_monitor_snapshots ADD COLUMN data_quality TEXT NOT NULL DEFAULT 'unknown'",
+                [],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn latest_trade_id(&self, account_id: &str) -> Result<Option<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT MAX(id) FROM trades WHERE account_id = ?1")?;
+        let latest = stmt.query_row(params![account_id], |row| row.get(0))?;
+        Ok(latest)
     }
 }
 
@@ -759,7 +895,7 @@ mod tests {
                 5.30,
                 0.0,
                 "opening short call",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
         assert_eq!(id, 1);
@@ -776,22 +912,55 @@ mod tests {
 
         // Buy 200 shares of TSLA
         ledger
-            .record_trade("2026-01-15", "TSLA", "TSLA", "stock", None, None, "buy", 200, 350.0, 0.0, "", "firstrade")
+            .record_trade(
+                "2026-01-15",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                200,
+                350.0,
+                0.0,
+                "",
+                "firstrade",
+            )
             .unwrap();
 
         // Sell 2 call contracts (short)
         ledger
             .record_trade(
-                "2026-02-01", "TSLA260320C00400000", "TSLA", "call",
-                Some(400.0), Some("2026-03-20"), "sell", 2, 5.30, 0.0, "", "firstrade"
+                "2026-02-01",
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                Some(400.0),
+                Some("2026-03-20"),
+                "sell",
+                2,
+                5.30,
+                0.0,
+                "",
+                "firstrade",
             )
             .unwrap();
 
         // Buy 1 call contract back (partial close)
         ledger
             .record_trade(
-                "2026-02-15", "TSLA260320C00400000", "TSLA", "call",
-                Some(400.0), Some("2026-03-20"), "buy", 1, 3.20, 0.0, "", "firstrade"
+                "2026-02-15",
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                Some(400.0),
+                Some("2026-03-20"),
+                "buy",
+                1,
+                3.20,
+                0.0,
+                "",
+                "firstrade",
             )
             .unwrap();
 
@@ -812,7 +981,20 @@ mod tests {
     fn delete_trade() {
         let ledger = in_memory_ledger();
         let id = ledger
-            .record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "", "firstrade")
+            .record_trade(
+                "2026-03-01",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                100,
+                380.0,
+                0.0,
+                "",
+                "firstrade",
+            )
             .unwrap();
 
         assert!(ledger.delete_trade(id).unwrap());
@@ -825,10 +1007,43 @@ mod tests {
     #[test]
     fn filter_by_underlying() {
         let ledger = in_memory_ledger();
-        ledger.record_trade("2026-03-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 380.0, 0.0, "", "firstrade").unwrap();
-        ledger.record_trade("2026-03-01", "AAPL", "AAPL", "stock", None, None, "buy", 50, 175.0, 0.0, "", "firstrade").unwrap();
+        ledger
+            .record_trade(
+                "2026-03-01",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                100,
+                380.0,
+                0.0,
+                "",
+                "firstrade",
+            )
+            .unwrap();
+        ledger
+            .record_trade(
+                "2026-03-01",
+                "AAPL",
+                "AAPL",
+                "stock",
+                None,
+                None,
+                "buy",
+                50,
+                175.0,
+                0.0,
+                "",
+                "firstrade",
+            )
+            .unwrap();
 
-        let filter = TradeFilter { underlying: Some("TSLA".into()), ..Default::default() };
+        let filter = TradeFilter {
+            underlying: Some("TSLA".into()),
+            ..Default::default()
+        };
         let trades = ledger.list_trades(&filter).unwrap();
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].underlying, "TSLA");
@@ -837,8 +1052,38 @@ mod tests {
     #[test]
     fn closed_position_not_in_results() {
         let ledger = in_memory_ledger();
-        ledger.record_trade("2026-01-01", "TSLA", "TSLA", "stock", None, None, "buy", 100, 350.0, 0.0, "", "firstrade").unwrap();
-        ledger.record_trade("2026-02-01", "TSLA", "TSLA", "stock", None, None, "sell", 100, 400.0, 0.0, "", "firstrade").unwrap();
+        ledger
+            .record_trade(
+                "2026-01-01",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                100,
+                350.0,
+                0.0,
+                "",
+                "firstrade",
+            )
+            .unwrap();
+        ledger
+            .record_trade(
+                "2026-02-01",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "sell",
+                100,
+                400.0,
+                0.0,
+                "",
+                "firstrade",
+            )
+            .unwrap();
 
         let positions = ledger.calculate_positions("firstrade", None).unwrap();
         assert!(positions.is_empty());
@@ -860,7 +1105,7 @@ mod tests {
                 5.00,
                 0.0,
                 "",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
 
@@ -887,7 +1132,7 @@ mod tests {
                 10.0,
                 5.0,
                 "",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
 
@@ -902,29 +1147,50 @@ mod tests {
     fn expired_contract_is_filtered() {
         let ledger = in_memory_ledger();
         // Record a trade with an old expiry (e.g., 2026-02-20)
-        ledger.record_trade(
-            "2026-02-20",
-            "TSLA260220P390000",
-            "TSLA",
-            "put",
-            Some(390.0),
-            Some("2026-02-20"),
-            "sell",
-            1,
-            0.01,
-            0.0,
-            "expired short put",
-            "firstrade"
-        ).unwrap();
+        ledger
+            .record_trade(
+                "2026-02-20",
+                "TSLA260220P390000",
+                "TSLA",
+                "put",
+                Some(390.0),
+                Some("2026-02-20"),
+                "sell",
+                1,
+                0.01,
+                0.0,
+                "expired short put",
+                "firstrade",
+            )
+            .unwrap();
 
         // Calculate positions - assuming today is after 2026-02-20
         let positions = ledger.calculate_positions("firstrade", None).unwrap();
-        assert!(positions.is_empty(), "Expired contract should be filtered out");
+        assert!(
+            positions.is_empty(),
+            "Expired contract should be filtered out"
+        );
     }
 
     #[test]
     fn account_snapshots_roundtrip() {
         let ledger = in_memory_ledger();
+        ledger
+            .record_trade(
+                "2026-03-02",
+                "TSLA",
+                "TSLA",
+                "stock",
+                None,
+                None,
+                "buy",
+                1,
+                100.0,
+                0.0,
+                "",
+                "firstrade",
+            )
+            .unwrap();
         let id = ledger
             .record_account_snapshot(
                 "2026-03-02T09:30:00Z",
@@ -936,17 +1202,57 @@ mod tests {
                 None,
                 true,
                 "initial snapshot",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
         assert_eq!(id, 1);
 
-        let latest = ledger.latest_account_snapshot("firstrade").unwrap().expect("snapshot");
+        let latest = ledger
+            .latest_account_snapshot("firstrade")
+            .unwrap()
+            .expect("snapshot");
+        assert_eq!(latest.baseline_trade_id, Some(1));
         assert_eq!(latest.trade_date_cash, 50_000.0);
         assert_eq!(latest.settled_cash, 50_000.0);
         assert_eq!(latest.option_buying_power, Some(120_000.0));
         assert!(latest.margin_enabled);
         assert_eq!(latest.notes, "initial snapshot");
+    }
+
+    #[test]
+    fn create_tables_migrates_legacy_account_snapshots_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_snapshots (
+                id                  INTEGER PRIMARY KEY,
+                snapshot_at         TEXT    NOT NULL,
+                trade_date_cash     REAL    NOT NULL,
+                settled_cash        REAL    NOT NULL,
+                option_buying_power REAL,
+                stock_buying_power  REAL,
+                margin_loan         REAL,
+                short_market_value  REAL,
+                margin_enabled      BOOLEAN NOT NULL,
+                notes               TEXT    NOT NULL,
+                account_id          TEXT    NOT NULL DEFAULT 'firstrade'
+            );",
+        )
+        .unwrap();
+
+        let ledger = Ledger { conn };
+        ledger.create_tables().unwrap();
+
+        let mut stmt = ledger
+            .conn
+            .prepare("PRAGMA table_info(account_snapshots)")
+            .unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(columns.iter().any(|name| name == "baseline_trade_id"));
     }
 
     #[test]
@@ -965,7 +1271,7 @@ mod tests {
                 5.0,
                 0.0,
                 "",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
         ledger
@@ -981,7 +1287,7 @@ mod tests {
                 0.0,
                 0.0,
                 "expired",
-                "firstrade"
+                "firstrade",
             )
             .unwrap();
 
@@ -992,11 +1298,12 @@ mod tests {
     #[test]
     fn account_monitor_snapshots_roundtrip_ok() {
         let ledger = in_memory_ledger();
-        let id = ledger
+        ledger
             .record_account_monitor_snapshot(&AccountMonitorSnapshotInput {
                 captured_at: "2026-03-06T14:35:00Z".to_string(),
                 account_id: "firstrade".to_string(),
                 status: "ok".to_string(),
+                data_quality: "complete".to_string(),
                 error_message: None,
                 trade_date_cash: Some(12_000.0),
                 settled_cash: Some(11_500.0),
@@ -1014,69 +1321,113 @@ mod tests {
                 notes: "monitor tick".to_string(),
             })
             .unwrap();
-        assert_eq!(id, 1);
-
-        let mut stmt = ledger
-            .conn
-            .prepare(
-                "SELECT status, account_id, positions_count, equity_estimate, notes
-                 FROM account_monitor_snapshots
-                 WHERE id = ?1",
-            )
+        let snapshots = ledger
+            .list_account_monitor_snapshots("firstrade", 10)
             .unwrap();
-        let row = stmt
-            .query_row(params![id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })
-            .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        let row = &snapshots[0];
 
-        assert_eq!(row.0, "ok");
-        assert_eq!(row.1, "firstrade");
-        assert_eq!(row.2, Some(3));
-        assert_eq!(row.3, Some(34_500.0));
-        assert_eq!(row.4, "monitor tick");
+        assert_eq!(row.status, "ok");
+        assert_eq!(row.data_quality, "complete");
+        assert_eq!(row.account_id, "firstrade");
+        assert_eq!(row.positions_count, Some(3));
+        assert_eq!(row.equity_estimate, Some(34_500.0));
+        assert_eq!(row.notes, "monitor tick");
     }
 
     #[test]
     fn account_monitor_snapshots_roundtrip_error() {
         let ledger = in_memory_ledger();
-        let id = ledger
+        ledger
             .record_account_monitor_snapshot(&AccountMonitorSnapshotInput {
                 captured_at: "2026-03-06T14:40:00Z".to_string(),
                 account_id: "firstrade".to_string(),
                 status: "error".to_string(),
+                data_quality: "system_error".to_string(),
                 error_message: Some("failed to enrich positions".to_string()),
                 notes: "monitor tick".to_string(),
                 ..Default::default()
             })
             .unwrap();
+        let snapshots = ledger
+            .list_account_monitor_snapshots("firstrade", 10)
+            .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        let row = &snapshots[0];
+
+        assert_eq!(row.status, "error");
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some("failed to enrich positions")
+        );
+        assert_eq!(row.trade_date_cash, None);
+    }
+
+    #[test]
+    fn list_account_monitor_snapshots_respects_limit() {
+        let ledger = in_memory_ledger();
+        for i in 0..3 {
+            ledger
+                .record_account_monitor_snapshot(&AccountMonitorSnapshotInput {
+                    captured_at: format!("2026-03-06T14:4{i}:00Z"),
+                    account_id: "firstrade".to_string(),
+                    status: "ok".to_string(),
+                    data_quality: "complete".to_string(),
+                    notes: format!("tick-{i}"),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let snapshots = ledger
+            .list_account_monitor_snapshots("firstrade", 2)
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].notes, "tick-2");
+        assert_eq!(snapshots[1].notes, "tick-1");
+    }
+
+    #[test]
+    fn create_tables_migrates_legacy_account_monitor_snapshots_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_snapshots (
+                id                    INTEGER PRIMARY KEY,
+                captured_at           TEXT    NOT NULL,
+                account_id            TEXT    NOT NULL,
+                status                TEXT    NOT NULL,
+                error_message         TEXT,
+                trade_date_cash       REAL,
+                settled_cash          REAL,
+                margin_loan           REAL,
+                option_buying_power   REAL,
+                positions_count       INTEGER,
+                position_market_value REAL,
+                unrealized_pnl        REAL,
+                total_margin_required REAL,
+                net_delta_shares      REAL,
+                total_gamma           REAL,
+                total_theta_per_day   REAL,
+                total_vega            REAL,
+                equity_estimate       REAL,
+                notes                 TEXT    NOT NULL
+            );",
+        )
+        .unwrap();
+
+        let ledger = Ledger { conn };
+        ledger.create_tables().unwrap();
 
         let mut stmt = ledger
             .conn
-            .prepare(
-                "SELECT status, error_message, trade_date_cash
-                 FROM account_monitor_snapshots
-                 WHERE id = ?1",
-            )
+            .prepare("PRAGMA table_info(account_monitor_snapshots)")
             .unwrap();
-        let row = stmt
-            .query_row(params![id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                ))
-            })
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
 
-        assert_eq!(row.0, "error");
-        assert_eq!(row.1.as_deref(), Some("failed to enrich positions"));
-        assert_eq!(row.2, None);
+        assert!(columns.iter().any(|name| name == "data_quality"));
     }
 }

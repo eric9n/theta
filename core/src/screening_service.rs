@@ -46,8 +46,17 @@ pub fn apply_chain_screening(
             && matches_metric(row.local_greeks.theta_per_day, req.min_theta, req.max_theta)
             && matches_metric(row.local_greeks.vega, req.min_vega, req.max_vega)
             && matches_metric(parsed_iv(row), req.min_iv, req.max_iv)
-            && matches_metric(parsed_option_price(row), req.min_option_price, req.max_option_price)
-            && matches_otm_percent(row, underlying_price, req.min_otm_percent, req.max_otm_percent)
+            && matches_metric(
+                parsed_option_price(row),
+                req.min_option_price,
+                req.max_option_price,
+            )
+            && matches_otm_percent(
+                row,
+                underlying_price,
+                req.min_otm_percent,
+                req.max_otm_percent,
+            )
             && matches_diagnostics(row, req)
     });
     sort_chain_rows(rows, req.sort_by);
@@ -56,7 +65,10 @@ pub fn apply_chain_screening(
     }
 }
 
-pub fn validate_strike_bounds(min_strike: Option<f64>, max_strike: Option<f64>) -> anyhow::Result<()> {
+pub fn validate_strike_bounds(
+    min_strike: Option<f64>,
+    max_strike: Option<f64>,
+) -> anyhow::Result<()> {
     if let (Some(min), Some(max)) = (min_strike, max_strike)
         && min > max
     {
@@ -65,7 +77,11 @@ pub fn validate_strike_bounds(min_strike: Option<f64>, max_strike: Option<f64>) 
     Ok(())
 }
 
-pub fn validate_metric_bounds(min: Option<f64>, max: Option<f64>, label: &str) -> anyhow::Result<()> {
+pub fn validate_metric_bounds(
+    min: Option<f64>,
+    max: Option<f64>,
+    label: &str,
+) -> anyhow::Result<()> {
     if let (Some(min), Some(max)) = (min, max)
         && min > max
     {
@@ -78,7 +94,11 @@ fn matches_side(row: &ChainAnalysisRow, side: Option<ContractSide>) -> bool {
     side.is_none_or(|side| row.option_type == side)
 }
 
-fn matches_strike(row: &ChainAnalysisRow, min_strike: Option<f64>, max_strike: Option<f64>) -> bool {
+fn matches_strike(
+    row: &ChainAnalysisRow,
+    min_strike: Option<f64>,
+    max_strike: Option<f64>,
+) -> bool {
     let strike = row.strike_price.parse::<f64>().unwrap_or(f64::NAN);
 
     if let Some(min) = min_strike
@@ -144,7 +164,8 @@ fn matches_diagnostics(row: &ChainAnalysisRow, req: &ChainScreeningRequest) -> b
         return false;
     }
     if req.exclude_abnormal
-        && (row.diagnostics.halted_or_abnormal_trade_status || row.diagnostics.non_standard_contract)
+        && (row.diagnostics.halted_or_abnormal_trade_status
+            || row.diagnostics.non_standard_contract)
     {
         return false;
     }
