@@ -1,4 +1,10 @@
+mod backend;
+mod cache;
+
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use backend::QuoteBackend;
+use cache::QuoteCache;
 use longport::quote::QuoteContext;
 use serde_json::json;
 use std::path::Path;
@@ -18,6 +24,62 @@ const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const RUNTIME_DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
+
+struct ProductionQuoteBackend {
+    sdk_manager: Arc<SdkManager>,
+}
+
+impl ProductionQuoteBackend {
+    fn new(sdk_manager: Arc<SdkManager>) -> Self {
+        Self { sdk_manager }
+    }
+}
+
+#[async_trait]
+impl QuoteBackend for ProductionQuoteBackend {
+    async fn quote(&self, symbols: Vec<String>) -> Result<Vec<serde_json::Value>> {
+        let ctx = self.sdk_manager.get_ctx().await?;
+        Ok(json!(ctx.quote(symbols).await?)
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn option_quote(&self, symbols: Vec<String>) -> Result<Vec<serde_json::Value>> {
+        let ctx = self.sdk_manager.get_ctx().await?;
+        Ok(json!(ctx.option_quote(symbols).await?)
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn option_chain_expiry_date_list(&self, symbol: String) -> Result<Vec<String>> {
+        let ctx = self.sdk_manager.get_ctx().await?;
+        Ok(ctx
+            .option_chain_expiry_date_list(symbol)
+            .await?
+            .into_iter()
+            .map(|date| date.to_string())
+            .collect())
+    }
+
+    async fn option_chain_info_by_date(
+        &self,
+        symbol: String,
+        expiry: time::Date,
+    ) -> Result<Vec<serde_json::Value>> {
+        let ctx = self.sdk_manager.get_ctx().await?;
+        Ok(json!(ctx.option_chain_info_by_date(symbol, expiry).await?)
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+struct DaemonApp {
+    sdk_manager: Arc<SdkManager>,
+    quote_cache: Arc<QuoteCache<ProductionQuoteBackend>>,
+}
 
 /// Manages the lifecycle and health of the LongPort SDK QuoteContext.
 struct SdkManager {
@@ -115,6 +177,11 @@ async fn main() -> Result<()> {
     prepare_socket_path(&socket_path).await?;
 
     let sdk_manager = Arc::new(SdkManager::new().await?);
+    let quote_backend = Arc::new(ProductionQuoteBackend::new(Arc::clone(&sdk_manager)));
+    let app = Arc::new(DaemonApp {
+        sdk_manager: Arc::clone(&sdk_manager),
+        quote_cache: Arc::new(QuoteCache::new(quote_backend)),
+    });
 
     {
         let mgr = Arc::clone(&sdk_manager);
@@ -154,9 +221,9 @@ async fn main() -> Result<()> {
             accept_res = listener.accept() => {
                 match accept_res {
                     Ok((stream, _)) => {
-                        let mgr = Arc::clone(&sdk_manager);
+                        let app = Arc::clone(&app);
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, mgr).await {
+                            if let Err(e) = handle_connection(stream, app).await {
                                 warn!("Proxy connection closed with error: {}", e);
                             }
                         });
@@ -253,7 +320,7 @@ fn parse_request_frame(frame: &[u8]) -> std::result::Result<DaemonRequest, Daemo
         .map_err(|e| DaemonResponse::error(format!("Invalid daemon request: {}", e)))
 }
 
-async fn handle_connection(stream: UnixStream, mgr: Arc<SdkManager>) -> Result<()> {
+async fn handle_connection(stream: UnixStream, app: Arc<DaemonApp>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -283,22 +350,16 @@ async fn handle_connection(stream: UnixStream, mgr: Arc<SdkManager>) -> Result<(
             }
         };
 
-        let response = match mgr.get_ctx().await {
-            Ok(ctx) => match timeout(SDK_TIMEOUT, dispatch_raw_sdk_call(&req, &ctx)).await {
-                Ok(Ok(val)) => DaemonResponse::success_value(val),
-                Ok(Err(e)) => {
-                    error!("SDK Proxy functional failure [{}]: {}", req.method, e);
-                    DaemonResponse::error(e.to_string())
-                }
-                Err(_) => {
-                    error!("SDK Proxy call timed out [{}]", req.method);
-                    mgr.invalidate_ctx().await;
-                    DaemonResponse::error("SDK operation timed out".to_string())
-                }
-            },
-            Err(e) => {
-                error!("SDK Proxy unavailable: {}", e);
-                DaemonResponse::error(format!("SDK unavailable: {}", e))
+        let response = match timeout(SDK_TIMEOUT, dispatch_raw_sdk_call(&req, &app)).await {
+            Ok(Ok(val)) => DaemonResponse::success_value(val),
+            Ok(Err(e)) => {
+                error!("SDK Proxy functional failure [{}]: {}", req.method, e);
+                DaemonResponse::error(e.to_string())
+            }
+            Err(_) => {
+                error!("SDK Proxy call timed out [{}]", req.method);
+                app.sdk_manager.invalidate_ctx().await;
+                DaemonResponse::error("SDK operation timed out".to_string())
             }
         };
 
@@ -308,22 +369,19 @@ async fn handle_connection(stream: UnixStream, mgr: Arc<SdkManager>) -> Result<(
     Ok(())
 }
 
-async fn dispatch_raw_sdk_call(
-    req: &DaemonRequest,
-    ctx: &QuoteContext,
-) -> Result<serde_json::Value> {
+async fn dispatch_raw_sdk_call(req: &DaemonRequest, app: &DaemonApp) -> Result<serde_json::Value> {
     match req.method.as_str() {
         "quote" => {
             let symbols: Vec<String> = serde_json::from_value(req.params.clone())?;
-            Ok(json!(ctx.quote(symbols).await?))
+            app.quote_cache.quote(symbols).await
         }
         "option_quote" => {
             let symbols: Vec<String> = serde_json::from_value(req.params.clone())?;
-            Ok(json!(ctx.option_quote(symbols).await?))
+            app.quote_cache.option_quote(symbols).await
         }
         "option_chain_expiry_date_list" => {
             let symbol: String = serde_json::from_value(req.params.clone())?;
-            Ok(json!(ctx.option_chain_expiry_date_list(symbol).await?))
+            app.quote_cache.option_chain_expiry_date_list(symbol).await
         }
         "option_chain_info_by_date" => {
             #[derive(serde::Deserialize)]
@@ -334,9 +392,9 @@ async fn dispatch_raw_sdk_call(
             let p: Params = serde_json::from_value(req.params.clone())?;
             let format = time::format_description::parse("[year]-[month]-[day]")?;
             let expiry = time::Date::parse(&p.expiry, &format)?;
-            Ok(json!(
-                ctx.option_chain_info_by_date(p.symbol, expiry).await?
-            ))
+            app.quote_cache
+                .option_chain_info_by_date(p.symbol, expiry)
+                .await
         }
         "calc_indexes" => {
             #[derive(serde::Deserialize)]
@@ -345,6 +403,7 @@ async fn dispatch_raw_sdk_call(
                 indexes: Vec<String>,
             }
             let p: Params = serde_json::from_value(req.params.clone())?;
+            let ctx = app.sdk_manager.get_ctx().await?;
 
             let mut sdk_indexes = Vec::new();
             for s in p.indexes {
@@ -373,6 +432,7 @@ async fn dispatch_raw_sdk_call(
             let format = time::format_description::parse("[year]-[month]-[day]")?;
             let start = time::Date::parse(&p.start, &format)?;
             let end = time::Date::parse(&p.end, &format)?;
+            let ctx = app.sdk_manager.get_ctx().await?;
             Ok(json!(ctx.trading_days(p.market, start, end).await?))
         }
         _ => anyhow::bail!("Method not found in raw SDK proxy: {}", req.method),
