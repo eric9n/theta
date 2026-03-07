@@ -324,7 +324,8 @@ impl ThetaSignalService {
                     tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
                 }
 
-                self.adaptive_analyze_chain(
+                match self
+                    .adaptive_analyze_chain(
                     expiry,
                     AnalyzeChainRequest {
                         symbol: symbol.clone(),
@@ -342,7 +343,25 @@ impl ThetaSignalService {
                         },
                     },
                 )
-                .await?
+                .await
+                {
+                    Ok(view) => view,
+                    Err(err)
+                        if i > 0
+                            && !points.is_empty()
+                            && is_transient_quote_limit_error(&err) =>
+                    {
+                        tracing::warn!(
+                            "Stopping term structure early for {} after {} points due to transient quote limit at expiry {}: {}",
+                            symbol,
+                            points.len(),
+                            expiry,
+                            err
+                        );
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                }
             };
 
             points.push(build_term_structure_point(&analysis)?);
@@ -388,6 +407,14 @@ impl ThetaSignalService {
             }
         }
     }
+}
+
+fn is_transient_quote_limit_error(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("301606")
+        || text.contains("301607")
+        || text.contains("Request rate limit")
+        || text.contains("Too many option securities request within one minute")
 }
 
 fn validate_skew_request(req: &SkewSignalRequest) -> Result<()> {
@@ -1406,5 +1433,18 @@ mod tests {
             .expect("same-day expiry should resolve");
 
         assert_eq!(expiry, today);
+    }
+
+    #[test]
+    fn detects_transient_quote_limit_errors() {
+        assert!(super::is_transient_quote_limit_error(&anyhow::anyhow!(
+            "SDK Proxy Error [option_quote]: response error: 7: detail:Some(WsResponseErrorDetail {{ code: 301607, msg: \"Too many option securities request within one minute\" }})"
+        )));
+        assert!(super::is_transient_quote_limit_error(&anyhow::anyhow!(
+            "SDK Proxy Error [option_quote]: response error: 301606 Request rate limit"
+        )));
+        assert!(!super::is_transient_quote_limit_error(&anyhow::anyhow!(
+            "target_price is outside solvable range"
+        )));
     }
 }
