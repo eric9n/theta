@@ -1,15 +1,20 @@
 use crate::analytics::ContractSide;
-use crate::daemon_protocol::{DaemonRequest, DaemonResponse};
+use crate::daemon_protocol::{
+    DaemonRequest, DaemonResponse, MAX_DAEMON_RESPONSE_BYTES, encode_json_line, read_bounded_frame,
+};
 use crate::domain::{
     OptionChainSnapshot, OptionContractSnapshot, ProviderGreeks, UnderlyingSnapshot,
 };
-use anyhow::{Context, Result, bail};
+use crate::runtime::theta_socket_path;
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserializer;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use time::{Date, OffsetDateTime};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::time::{Duration, timeout};
 
 // --- Local Mirror Types for LongPort SDK JSON structure ---
 // These allow core to be independent of the longport crate.
@@ -102,25 +107,41 @@ pub struct StrikePriceInfo {
     pub standard: bool,
 }
 
-const SOCKET_PATH: &str = "/tmp/theta.sock";
+const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CLIENT_RPC_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// A pure UDS Proxy Client for the LongPort SDK.
 /// This is the only implementation allowed in the application layer.
-pub struct MarketDataClient;
+pub struct MarketDataClient {
+    socket_path: PathBuf,
+}
 
 impl MarketDataClient {
     pub async fn connect() -> Result<Self> {
-        if !std::path::Path::new(SOCKET_PATH).exists() {
-            bail!(
-                "Theta daemon is not running (socket not found at {})",
-                SOCKET_PATH
-            );
-        }
-        // Verify connectivity
-        let _ = UnixStream::connect(SOCKET_PATH)
+        let socket_path = theta_socket_path()?;
+        verify_socket_path_exists(&socket_path)?;
+
+        let _ = timeout(CLIENT_CONNECT_TIMEOUT, UnixStream::connect(&socket_path))
             .await
-            .context("Failed to connect to Theta daemon")?;
-        Ok(Self)
+            .with_context(|| {
+                format!(
+                    "Timed out connecting to theta daemon at {}",
+                    socket_path.display()
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "Failed to connect to theta daemon at {}",
+                    socket_path.display()
+                )
+            })?;
+
+        Ok(Self { socket_path })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(socket_path: PathBuf) -> Self {
+        Self { socket_path }
     }
 
     /// Generic UDS RPC call helper.
@@ -130,28 +151,66 @@ impl MarketDataClient {
         method: &str,
         params: P,
     ) -> Result<R> {
-        let mut stream = UnixStream::connect(SOCKET_PATH)
+        verify_socket_path_exists(&self.socket_path)?;
+
+        timeout(CLIENT_RPC_TIMEOUT, self.rpc_call_inner(method, params))
             .await
-            .with_context(|| format!("Proxy call failed for method {}", method))?;
+            .with_context(|| format!("Theta daemon RPC timed out for {}", method))?
+    }
+
+    async fn rpc_call_inner<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R> {
+        let mut stream = timeout(
+            CLIENT_CONNECT_TIMEOUT,
+            UnixStream::connect(&self.socket_path),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Timed out connecting to theta daemon for {} at {}",
+                method,
+                self.socket_path.display()
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "Failed to connect to theta daemon for {} at {}",
+                method,
+                self.socket_path.display()
+            )
+        })?;
 
         let req = DaemonRequest {
             method: method.to_string(),
             params: serde_json::to_value(params)?,
         };
 
-        let mut req_json = serde_json::to_string(&req)?;
-        req_json.push('\n');
-        stream.write_all(req_json.as_bytes()).await?;
+        let req_bytes = encode_json_line(&req)?;
+        stream.write_all(&req_bytes).await.with_context(|| {
+            format!(
+                "Failed to send request to theta daemon for {} at {}",
+                method,
+                self.socket_path.display()
+            )
+        })?;
 
         let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        let frame = read_bounded_frame(
+            &mut reader,
+            MAX_DAEMON_RESPONSE_BYTES,
+            "daemon response frame",
+        )
+        .await
+        .map_err(|err| anyhow!("Failed to read daemon response for {}: {err}", method))?
+        .context(format!(
+            "Theta daemon closed connection unexpectedly during {}",
+            method
+        ))?;
 
-        if line.is_empty() {
-            bail!("Daemon closed connection unexpectedly during {}", method);
-        }
-
-        let resp: DaemonResponse = serde_json::from_str(&line)
+        let resp: DaemonResponse = serde_json::from_slice(&frame)
             .with_context(|| format!("Failed to parse daemon response for {}", method))?;
 
         if let Some(err) = resp.error {
@@ -368,6 +427,16 @@ pub fn days_to_expiry(expiry: Date) -> i64 {
     if days < 1 { 1 } else { days }
 }
 
+fn verify_socket_path_exists(socket_path: &Path) -> Result<()> {
+    if !socket_path.exists() {
+        bail!(
+            "Theta daemon is not running (socket not found at {}). Start theta-daemon or set THETA_SOCKET_PATH.",
+            socket_path.display()
+        );
+    }
+    Ok(())
+}
+
 fn json_value_as_string(value: &serde_json::Value) -> String {
     value
         .as_str()
@@ -395,7 +464,29 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{MarketTradingDays, OptionDirection, OptionQuote, option_snapshot_from_quote};
+    use super::{
+        CLIENT_RPC_TIMEOUT, MarketDataClient, MarketTradingDays, OptionDirection, OptionQuote,
+        option_snapshot_from_quote,
+    };
+    use crate::daemon_protocol::MAX_DAEMON_RESPONSE_BYTES;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+    use tokio::time::{Duration, sleep};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    async fn bind_test_listener() -> (tempfile::TempDir, PathBuf, UnixListener) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("theta.sock");
+        let listener = UnixListener::bind(&path).expect("bind test socket");
+        (dir, path, listener)
+    }
 
     #[test]
     fn option_quote_deserializes_string_expiry_date() {
@@ -516,5 +607,76 @@ mod tests {
             option_snapshot_from_quote(quote).expect("snapshot conversion should succeed");
         assert_eq!(snapshot.trade_status, "Normal");
         assert_eq!(snapshot.contract_style, "American");
+    }
+
+    #[test]
+    fn socket_path_prefers_env_override() {
+        let _guard = env_lock().lock().expect("lock poisoned");
+        unsafe {
+            std::env::set_var("THETA_SOCKET_PATH", "/tmp/test-theta.sock");
+            std::env::remove_var("HOME");
+        }
+
+        let resolved = crate::runtime::theta_socket_path().expect("socket path");
+        assert_eq!(resolved, PathBuf::from("/tmp/test-theta.sock"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_malformed_daemon_response() {
+        let (_dir, path, listener) = bind_test_listener().await;
+        let client = MarketDataClient::for_tests(path);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            stream
+                .write_all(b"not-json\n")
+                .await
+                .expect("write malformed frame");
+        });
+
+        let err = client
+            .fetch_option_expiries("TSLA.US")
+            .await
+            .expect_err("malformed response should fail");
+        assert!(err.to_string().contains("Failed to parse daemon response"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_oversized_daemon_response() {
+        let (_dir, path, listener) = bind_test_listener().await;
+        let client = MarketDataClient::for_tests(path);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut payload = vec![b'x'; MAX_DAEMON_RESPONSE_BYTES + 1];
+            payload.push(b'\n');
+            stream
+                .write_all(&payload)
+                .await
+                .expect("write oversized frame");
+        });
+
+        let err = client
+            .fetch_option_expiries("TSLA.US")
+            .await
+            .expect_err("oversized response should fail");
+        assert!(err.to_string().contains("exceeded"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rpc_times_out_when_server_never_replies() {
+        let (_dir, path, listener) = bind_test_listener().await;
+        let client = MarketDataClient::for_tests(path);
+
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            sleep(CLIENT_RPC_TIMEOUT + Duration::from_secs(1)).await;
+        });
+
+        let err = client
+            .fetch_option_expiries("TSLA.US")
+            .await
+            .expect_err("missing response should time out");
+        assert!(err.to_string().contains("timed out"));
     }
 }

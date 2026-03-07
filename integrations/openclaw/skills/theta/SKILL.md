@@ -25,7 +25,8 @@ General rules:
 cd /root/theta && cargo build --release --bin theta
 ```
 
-- Market-data commands require the local `theta-daemon` to be running and reachable at `/tmp/theta.sock`.
+- Market-data commands require the local `theta-daemon` to be running and reachable at `${HOME}/.theta/run/theta.sock` by default.
+- Set `THETA_SOCKET_PATH` to override the socket location if the daemon is configured elsewhere.
 - LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 - Default config path is `~/.theta/config.json`.
 

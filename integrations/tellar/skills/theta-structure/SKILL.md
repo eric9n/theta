@@ -22,7 +22,8 @@ Each tool should execute the exact command template shown here.
 
 - All tool commands should call `./scripts/theta.sh structure ...`.
 - If the release binary is missing, build with `cargo build --release --bin theta`.
-- Live data requires the local `theta-daemon` to be running and reachable at `/tmp/theta.sock`.
+- Live data requires the local `theta-daemon` to be running and reachable at `${HOME}/.theta/run/theta.sock` by default.
+- Set `THETA_SOCKET_PATH` to override the socket location if the daemon is configured elsewhere.
 - LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 - `expiry` values must use `YYYY-MM-DD` where required.
 

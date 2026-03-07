@@ -24,7 +24,8 @@ Each tool should execute the exact command template shown here.
 - All tool commands should call `./scripts/theta.sh snapshot ...`.
 - If the release binary is missing, build with `cargo build --release --bin theta`.
 - Optional `json` means append `--json` at the end of the command.
-- Live data workflows require the local `theta-daemon` to be running and reachable at `/tmp/theta.sock`.
+- Live data workflows require the local `theta-daemon` to be running and reachable at `${HOME}/.theta/run/theta.sock` by default.
+- Set `THETA_SOCKET_PATH` to override the socket location if the daemon is configured elsewhere.
 - LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 - Date values use `YYYY-MM-DD`.
 - Prefer structured tools below instead of inventing new subcommands or flags.

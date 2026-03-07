@@ -26,7 +26,8 @@ cargo build --release -p theta-daemon
 ./target/release/theta-daemon
 ```
 
-`theta` CLI commands connect to the daemon over `/tmp/theta.sock`.
+`theta` CLI commands connect to the daemon over `${HOME}/.theta/run/theta.sock` by default.
+Set `THETA_SOCKET_PATH` to override the socket location for both `theta-daemon` and the `theta` CLI.
 LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 
 Optional config file:

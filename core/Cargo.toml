@@ -28,7 +28,7 @@ time = { version = "0.3", features = [
   "macros",
   "serde",
 ] }
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

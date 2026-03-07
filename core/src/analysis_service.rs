@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn resolves_dividend_yield_by_symbol_with_default_fallback() {
         let service = ThetaAnalysisService {
-            market: MarketDataClient,
+            market: MarketDataClient::for_tests(std::path::PathBuf::new()),
             rate_curve: RateCurve::default(),
             default_dividend_yield: 0.01,
             dividend_yields: HashMap::from([

@@ -13,6 +13,7 @@ pub mod portfolio_service;
 pub mod rate;
 pub mod risk_domain;
 pub mod risk_engine;
+pub mod runtime;
 pub mod screening_service;
 pub mod signal_service;
 pub mod snapshot_store;
