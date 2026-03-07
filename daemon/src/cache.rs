@@ -13,6 +13,7 @@ const OPTION_QUOTE_TTL: Duration = Duration::from_secs(8);
 const OPTION_EXPIRY_LIST_TTL: Duration = Duration::from_secs(15 * 60);
 const OPTION_CHAIN_INFO_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST: usize = 500;
+const OPTION_QUOTE_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct CacheEntry<T> {
@@ -42,6 +43,7 @@ pub struct QuoteCache<B: QuoteBackend, C: Clock = SystemClock> {
     option_quote_cache: RwLock<HashMap<String, CacheEntry<Value>>>,
     expiry_cache: RwLock<HashMap<String, CacheEntry<Vec<String>>>>,
     chain_info_cache: RwLock<HashMap<String, CacheEntry<Vec<Value>>>>,
+    option_quote_rate_limit_until: RwLock<Option<Duration>>,
     quote_fetch_lock: Mutex<()>,
     option_quote_fetch_lock: Mutex<()>,
     expiry_fetch_lock: Mutex<()>,
@@ -63,6 +65,7 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
             option_quote_cache: RwLock::new(HashMap::new()),
             expiry_cache: RwLock::new(HashMap::new()),
             chain_info_cache: RwLock::new(HashMap::new()),
+            option_quote_rate_limit_until: RwLock::new(None),
             quote_fetch_lock: Mutex::new(()),
             option_quote_fetch_lock: Mutex::new(()),
             expiry_fetch_lock: Mutex::new(()),
@@ -83,16 +86,147 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
     }
 
     pub async fn option_quote(&self, requested_symbols: Vec<String>) -> Result<Value> {
-        self.resolve_cached_batch_chunked(
-            "option_quote",
-            &requested_symbols,
-            &self.option_quote_cache,
-            &self.option_quote_fetch_lock,
-            OPTION_QUOTE_TTL,
-            MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST,
-            |symbols| self.backend.option_quote(symbols),
-        )
-        .await
+        let requested_keys = normalize_requested_symbols(&requested_symbols);
+        if requested_keys.is_empty() {
+            return Ok(Value::Array(Vec::new()));
+        }
+
+        let unique_keys = dedup_normalized_keys(&requested_keys);
+        let now = self.clock.now();
+        let mut cached_rows = self
+            .read_cached_rows(
+                &self.option_quote_cache,
+                &unique_keys,
+                OPTION_QUOTE_TTL,
+                now,
+            )
+            .await;
+        let mut misses = unique_keys
+            .iter()
+            .filter(|key| !cached_rows.contains_key((*key).as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !misses.is_empty() {
+            let _guard = self.option_quote_fetch_lock.lock().await;
+
+            cached_rows.extend(
+                self.read_cached_rows(
+                    &self.option_quote_cache,
+                    &misses,
+                    OPTION_QUOTE_TTL,
+                    self.clock.now(),
+                )
+                .await,
+            );
+            misses.retain(|key| !cached_rows.contains_key(key));
+
+            if !misses.is_empty() {
+                self.ensure_option_quote_cooldown_elapsed(misses.len())
+                    .await?;
+
+                for chunk in misses.chunks(MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST) {
+                    match self.backend.option_quote(chunk.to_vec()).await {
+                        Ok(rows) => {
+                            self.clear_option_quote_cooldown().await;
+                            let fresh_rows = index_rows_by_symbol(rows);
+                            if !fresh_rows.is_empty() {
+                                let inserted_at = self.clock.now();
+                                let mut write = self.option_quote_cache.write().await;
+                                for (key, value) in &fresh_rows {
+                                    write.insert(
+                                        key.clone(),
+                                        CacheEntry {
+                                            value: value.clone(),
+                                            inserted_at,
+                                        },
+                                    );
+                                }
+                                cached_rows.extend(fresh_rows);
+                            }
+                        }
+                        Err(err) => {
+                            let err_text = err.to_string();
+                            if is_rate_limit_error_text(&err_text) {
+                                self.activate_option_quote_cooldown().await;
+                                warn!(
+                                    method = "option_quote",
+                                    misses = misses.len(),
+                                    requested = requested_keys.len(),
+                                    chunk_size = chunk.len(),
+                                    cooldown_seconds = OPTION_QUOTE_RATE_LIMIT_COOLDOWN.as_secs(),
+                                    "LongPort option quote rate limit activated cooldown: {}",
+                                    err_text
+                                );
+                            } else {
+                                warn!(
+                                    method = "option_quote",
+                                    misses = misses.len(),
+                                    requested = requested_keys.len(),
+                                    chunk_size = chunk.len(),
+                                    "LongPort backend call failed: {}",
+                                    err_text
+                                );
+                            }
+
+                            let unresolved = requested_keys
+                                .iter()
+                                .filter(|key| !cached_rows.contains_key((*key).as_str()))
+                                .count();
+                            let cache_hits = unique_keys
+                                .iter()
+                                .filter(|key| cached_rows.contains_key((*key).as_str()))
+                                .count();
+                            debug!(
+                                method = "option_quote",
+                                requested_count = requested_keys.len(),
+                                unique_requested_count = unique_keys.len(),
+                                cache_hit_count = cache_hits,
+                                cache_miss_count = misses.len(),
+                                unresolved_count = unresolved,
+                                backend_called = true,
+                                ttl_seconds = OPTION_QUOTE_TTL.as_secs(),
+                                cooldown_active = true,
+                                "Daemon cache lookup completed"
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        let unresolved = requested_keys
+            .iter()
+            .filter(|key| !cached_rows.contains_key((*key).as_str()))
+            .count();
+        let cache_hits = unique_keys
+            .iter()
+            .filter(|key| cached_rows.contains_key((*key).as_str()))
+            .count()
+            .saturating_sub(misses.len().saturating_sub(unresolved));
+
+        let cooldown_active = self.is_option_quote_cooldown_active(self.clock.now()).await;
+
+        debug!(
+            method = "option_quote",
+            requested_count = requested_keys.len(),
+            unique_requested_count = unique_keys.len(),
+            cache_hit_count = cache_hits,
+            cache_miss_count = misses.len(),
+            unresolved_count = unresolved,
+            backend_called = !misses.is_empty(),
+            ttl_seconds = OPTION_QUOTE_TTL.as_secs(),
+            cooldown_active = cooldown_active,
+            "Daemon cache lookup completed"
+        );
+
+        Ok(Value::Array(
+            requested_keys
+                .iter()
+                .filter_map(|key| cached_rows.get(key).cloned())
+                .collect(),
+        ))
     }
 
     pub async fn option_chain_expiry_date_list(&self, symbol: String) -> Result<Value> {
@@ -269,32 +403,6 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
         .await
     }
 
-    async fn resolve_cached_batch_chunked<F, Fut>(
-        &self,
-        method: &'static str,
-        requested_symbols: &[String],
-        cache: &RwLock<HashMap<String, CacheEntry<Value>>>,
-        fetch_lock: &Mutex<()>,
-        ttl: Duration,
-        chunk_size: usize,
-        fetcher: F,
-    ) -> Result<Value>
-    where
-        F: Fn(Vec<String>) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Value>>>,
-    {
-        self.resolve_cached_batch_inner(
-            method,
-            requested_symbols,
-            cache,
-            fetch_lock,
-            ttl,
-            Some(chunk_size),
-            fetcher,
-        )
-        .await
-    }
-
     async fn resolve_cached_batch_inner<F, Fut>(
         &self,
         method: &'static str,
@@ -446,6 +554,43 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
         }
         rows
     }
+
+    async fn ensure_option_quote_cooldown_elapsed(&self, misses: usize) -> Result<()> {
+        let Some(until) = *self.option_quote_rate_limit_until.read().await else {
+            return Ok(());
+        };
+        let now = self.clock.now();
+        if now >= until {
+            return Ok(());
+        }
+        let remaining = until.saturating_sub(now).as_secs();
+        warn!(
+            method = "option_quote",
+            misses = misses,
+            cooldown_seconds_remaining = remaining,
+            "Skipping upstream option_quote call while local rate-limit cooldown is active"
+        );
+        anyhow::bail!(
+            "local option_quote cooldown active for {}s after upstream rate limit",
+            remaining
+        );
+    }
+
+    async fn activate_option_quote_cooldown(&self) {
+        *self.option_quote_rate_limit_until.write().await =
+            Some(self.clock.now() + OPTION_QUOTE_RATE_LIMIT_COOLDOWN);
+    }
+
+    async fn clear_option_quote_cooldown(&self) {
+        *self.option_quote_rate_limit_until.write().await = None;
+    }
+
+    async fn is_option_quote_cooldown_active(&self, now: Duration) -> bool {
+        self.option_quote_rate_limit_until
+            .read()
+            .await
+            .is_some_and(|until| now < until)
+    }
 }
 
 fn log_single_cache_event(
@@ -515,6 +660,13 @@ fn normalize_symbol_key(symbol: &str) -> String {
     symbol.trim().to_ascii_uppercase()
 }
 
+fn is_rate_limit_error_text(text: &str) -> bool {
+    text.contains("301606")
+        || text.contains("301607")
+        || text.contains("Request rate limit")
+        || text.contains("Too many option securities request within one minute")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +703,7 @@ mod tests {
         expiry_rows: HashMap<String, Vec<String>>,
         chain_info_rows: HashMap<String, Vec<Value>>,
         quote_fail_once: AtomicUsize,
+        option_quote_fail_once: AtomicUsize,
         option_quote_waiters: AtomicUsize,
         option_quote_started: Notify,
         option_quote_release: Notify,
@@ -607,6 +760,11 @@ mod tests {
 
         async fn option_quote(&self, symbols: Vec<String>) -> Result<Vec<Value>> {
             self.option_quote_calls.fetch_add(1, Ordering::SeqCst);
+            if self.option_quote_fail_once.swap(0, Ordering::SeqCst) == 1 {
+                anyhow::bail!(
+                    "response error: 7: detail:Some(WsResponseErrorDetail {{ code: 301607, msg: \"Too many option securities request within one minute\" }})"
+                );
+            }
             if self.option_quote_waiters.load(Ordering::SeqCst) > 0 {
                 self.option_quote_started.notify_waiters();
                 self.option_quote_release.notified().await;
@@ -810,5 +968,55 @@ mod tests {
         let _ = tokio::join!(first, second);
 
         assert_eq!(backend.option_quote_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn option_quote_rate_limit_triggers_local_cooldown() {
+        let clock = Arc::new(MockClock::default());
+        let backend = Arc::new(FakeBackend::with_option_quote_rows(&["TSLAA.US"]));
+        backend.option_quote_fail_once.store(1, Ordering::SeqCst);
+        let cache = QuoteCache::with_clock(backend.clone(), clock.clone());
+
+        let first = cache.option_quote(vec!["TSLAA.US".to_string()]).await;
+        let second = cache.option_quote(vec!["TSLAA.US".to_string()]).await;
+
+        assert!(first.is_err());
+        assert!(
+            second
+                .unwrap_err()
+                .to_string()
+                .contains("local option_quote cooldown active")
+        );
+        assert_eq!(backend.option_quote_calls.load(Ordering::SeqCst), 1);
+
+        clock.advance(OPTION_QUOTE_RATE_LIMIT_COOLDOWN + Duration::from_secs(1));
+        cache
+            .option_quote(vec!["TSLAA.US".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(backend.option_quote_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn option_quote_preserves_successful_chunks_before_rate_limit_failure() {
+        let clock = Arc::new(MockClock::default());
+        let symbols = (0..(MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST + 1))
+            .map(|idx| format!("TSLA{:03}.US", idx))
+            .collect::<Vec<_>>();
+        let backend = FakeBackend::with_option_quote_rows(
+            &symbols.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let backend = Arc::new(backend);
+        let cache = QuoteCache::with_clock(backend.clone(), clock.clone());
+
+        let first_batch = symbols[..MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST].to_vec();
+        cache.option_quote(first_batch.clone()).await.unwrap();
+
+        backend.option_quote_fail_once.store(1, Ordering::SeqCst);
+        let result = cache.option_quote(symbols.clone()).await;
+        assert!(result.is_err());
+
+        let cached_only = cache.option_quote(first_batch.clone()).await.unwrap();
+        assert_eq!(cached_only.as_array().unwrap().len(), first_batch.len());
     }
 }
