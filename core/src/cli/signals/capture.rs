@@ -98,22 +98,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         None => SignalSnapshotStore::open_default()?,
     };
     let service = ThetaSignalService::from_env().await?;
+    let loop_sleep_seconds = symbol_loop_sleep_seconds(symbols.len(), cli.every_seconds);
 
     loop {
-        let now_utc = OffsetDateTime::now_utc();
-        let captured_at = now_utc.format(&Rfc3339)?;
+        for (index, symbol) in symbols.iter().enumerate() {
+            let now_utc = OffsetDateTime::now_utc();
+            let captured_at = now_utc.format(&Rfc3339)?;
 
-        if cli.market_hours_only && !is_us_regular_market_hours(now_utc) {
-            println!("{captured_at} outside US regular market hours; skipping capture");
-            if !cli.r#loop {
-                break;
+            if cli.market_hours_only && !is_us_regular_market_hours(now_utc) {
+                println!("{captured_at} outside US regular market hours; skipping capture");
+                if !cli.r#loop {
+                    return Ok(());
+                }
+                if should_sleep_after_symbol(index, symbols.len(), cli.r#loop) {
+                    println!("sleeping {}s until next capture", loop_sleep_seconds);
+                    sleep(Duration::from_secs(loop_sleep_seconds)).await;
+                }
+                continue;
             }
-            println!("sleeping {}s until next capture", cli.every_seconds);
-            sleep(Duration::from_secs(cli.every_seconds)).await;
-            continue;
-        }
 
-        for symbol in &symbols {
             let capture = async {
                 let front_expiry = service.front_expiry_for_symbol(symbol).await?;
                 let view = service
@@ -148,21 +151,41 @@ pub async fn run(cli: Cli) -> Result<()> {
                     eprintln!(
                         "{captured_at} transient quote rate limit while capturing {symbol}: {err}"
                     );
-                    break;
+                } else {
+                    return Err(err);
                 }
-                return Err(err);
+            }
+
+            if should_sleep_after_symbol(index, symbols.len(), cli.r#loop) {
+                println!("sleeping {}s until next capture", loop_sleep_seconds);
+                sleep(Duration::from_secs(loop_sleep_seconds)).await;
             }
         }
 
         if !cli.r#loop {
             break;
         }
-
-        println!("sleeping {}s until next capture", cli.every_seconds);
-        sleep(Duration::from_secs(cli.every_seconds)).await;
     }
 
     Ok(())
+}
+
+fn symbol_loop_sleep_seconds(symbol_count: usize, every_seconds: u64) -> u64 {
+    if symbol_count <= 1 {
+        return every_seconds;
+    }
+
+    let symbol_count = symbol_count as u64;
+    let spacing = every_seconds / symbol_count;
+    spacing.max(1)
+}
+
+fn should_sleep_after_symbol(index: usize, symbol_count: usize, loop_enabled: bool) -> bool {
+    if !loop_enabled {
+        return false;
+    }
+
+    index + 1 <= symbol_count
 }
 
 fn is_transient_quote_limit_error(err: &Error) -> bool {
@@ -229,7 +252,9 @@ fn nth_weekday_of_month(year: i32, month: Month, weekday: Weekday, nth: u8) -> u
 
 #[cfg(test)]
 mod tests {
-    use super::is_transient_quote_limit_error;
+    use super::{
+        is_transient_quote_limit_error, should_sleep_after_symbol, symbol_loop_sleep_seconds,
+    };
     use anyhow::anyhow;
 
     #[test]
@@ -247,5 +272,20 @@ mod tests {
         assert!(!is_transient_quote_limit_error(&anyhow!(
             "target_price is outside solvable range for current model assumptions"
         )));
+    }
+
+    #[test]
+    fn spreads_loop_sleep_evenly_across_symbols() {
+        assert_eq!(symbol_loop_sleep_seconds(1, 300), 300);
+        assert_eq!(symbol_loop_sleep_seconds(2, 300), 150);
+        assert_eq!(symbol_loop_sleep_seconds(3, 300), 100);
+        assert_eq!(symbol_loop_sleep_seconds(4, 3), 1);
+    }
+
+    #[test]
+    fn only_sleeps_between_symbols_when_looping() {
+        assert!(should_sleep_after_symbol(0, 2, true));
+        assert!(should_sleep_after_symbol(1, 2, true));
+        assert!(!should_sleep_after_symbol(0, 2, false));
     }
 }
