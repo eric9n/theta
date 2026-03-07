@@ -50,17 +50,35 @@ impl PricingInput {
         dividend: f64,
         option_type: ContractSide,
     ) -> Result<Self> {
+        if !spot.is_finite() {
+            bail!("spot must be finite");
+        }
         if spot <= 0.0 {
             bail!("spot must be greater than 0");
+        }
+        if !strike.is_finite() {
+            bail!("strike must be finite");
         }
         if strike <= 0.0 {
             bail!("strike must be greater than 0");
         }
+        if !rate.is_finite() {
+            bail!("rate must be finite");
+        }
+        if !volatility.is_finite() {
+            bail!("volatility must be finite");
+        }
         if volatility <= 0.0 {
             bail!("volatility must be greater than 0");
         }
+        if !days.is_finite() {
+            bail!("days must be finite");
+        }
         if days <= 0.0 {
             bail!("days must be greater than 0");
+        }
+        if !dividend.is_finite() {
+            bail!("dividend must be finite");
         }
 
         Ok(Self {
@@ -158,6 +176,9 @@ pub fn implied_volatility_from_price(
     option_type: ContractSide,
     target_price: f64,
 ) -> Result<f64> {
+    if !target_price.is_finite() {
+        bail!("target_price must be finite");
+    }
     if target_price <= 0.0 {
         bail!("target_price must be greater than 0");
     }
@@ -300,6 +321,27 @@ mod tests {
         assert!(PricingInput::new(0.0, 100.0, 0.03, 0.2, 30.0, 0.0, ContractSide::Call).is_err());
         assert!(PricingInput::new(100.0, 0.0, 0.03, 0.2, 30.0, 0.0, ContractSide::Call).is_err());
         assert!(PricingInput::new(100.0, 100.0, 0.03, 0.0, 30.0, 0.0, ContractSide::Call).is_err());
+        assert!(
+            PricingInput::new(f64::NAN, 100.0, 0.03, 0.2, 30.0, 0.0, ContractSide::Call).is_err()
+        );
+        assert!(
+            PricingInput::new(
+                100.0,
+                100.0,
+                f64::INFINITY,
+                0.2,
+                30.0,
+                0.0,
+                ContractSide::Call
+            )
+            .is_err()
+        );
+        assert!(
+            PricingInput::new(100.0, 100.0, 0.03, 0.2, f64::NAN, 0.0, ContractSide::Call).is_err()
+        );
+        assert!(
+            PricingInput::new(100.0, 100.0, 0.03, 0.2, 30.0, f64::NAN, ContractSide::Call).is_err()
+        );
     }
 
     #[test]
@@ -319,5 +361,33 @@ mod tests {
         .expect("solvable");
 
         assert!((iv - 0.24).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn implied_volatility_rejects_non_finite_target_price() {
+        let err = implied_volatility_from_price(
+            100.0,
+            100.0,
+            0.05,
+            30.0,
+            0.0,
+            ContractSide::Call,
+            f64::NAN,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("target_price must be finite"));
+    }
+
+    #[test]
+    fn implied_volatility_rejects_prices_outside_model_range() {
+        let err =
+            implied_volatility_from_price(100.0, 50.0, 0.01, 30.0, 0.0, ContractSide::Call, 1.0)
+                .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("target_price is outside solvable range")
+        );
     }
 }

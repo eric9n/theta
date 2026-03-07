@@ -165,7 +165,8 @@ fn matches_diagnostics(row: &ChainAnalysisRow, req: &ChainScreeningRequest) -> b
     }
     if req.exclude_abnormal
         && (row.diagnostics.halted_or_abnormal_trade_status
-            || row.diagnostics.non_standard_contract)
+            || row.diagnostics.non_standard_contract
+            || row.diagnostics.below_intrinsic_value)
     {
         return false;
     }
@@ -457,6 +458,74 @@ mod tests {
                 limit: None,
             },
             100.0,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].option_symbol, "B");
+    }
+
+    #[test]
+    fn exclude_abnormal_filters_below_intrinsic_rows() {
+        let mut rows = vec![
+            ChainAnalysisRow {
+                option_symbol: "A".to_string(),
+                option_type: ContractSide::Call,
+                option_price: "40".to_string(),
+                volume: 10,
+                open_interest: 10,
+                strike_price: "350".to_string(),
+                implied_volatility: "0.2".to_string(),
+                implied_volatility_source: "provider".to_string(),
+                provider_reported_iv: "0.2".to_string(),
+                diagnostics: ContractDiagnostics {
+                    below_intrinsic_value: true,
+                    extrinsic_value: -10.0,
+                    ..ContractDiagnostics::default()
+                },
+                local_greeks: OptionMetrics {
+                    option_type: ContractSide::Call,
+                    fair_value: 1.0,
+                    delta: 0.2,
+                    gamma: 0.1,
+                    vega: 0.2,
+                    theta_per_day: -0.01,
+                    rho: 0.1,
+                    d1: 0.0,
+                    d2: 0.0,
+                },
+            },
+            ChainAnalysisRow {
+                option_symbol: "B".to_string(),
+                option_type: ContractSide::Call,
+                option_price: "55".to_string(),
+                volume: 10,
+                open_interest: 10,
+                strike_price: "350".to_string(),
+                implied_volatility: "0.2".to_string(),
+                implied_volatility_source: "provider".to_string(),
+                provider_reported_iv: "0.2".to_string(),
+                diagnostics: ContractDiagnostics::default(),
+                local_greeks: OptionMetrics {
+                    option_type: ContractSide::Call,
+                    fair_value: 1.0,
+                    delta: 0.2,
+                    gamma: 0.1,
+                    vega: 0.2,
+                    theta_per_day: -0.01,
+                    rho: 0.1,
+                    d1: 0.0,
+                    d2: 0.0,
+                },
+            },
+        ];
+
+        apply_chain_screening(
+            &mut rows,
+            &ChainScreeningRequest {
+                exclude_abnormal: true,
+                ..ChainScreeningRequest::default()
+            },
+            400.0,
         );
 
         assert_eq!(rows.len(), 1);

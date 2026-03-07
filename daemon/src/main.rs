@@ -10,7 +10,8 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use theta::daemon_protocol::{
-    DaemonRequest, DaemonResponse, MAX_DAEMON_REQUEST_BYTES, encode_json_line, read_bounded_frame,
+    DaemonError, DaemonRequest, DaemonResponse, MAX_DAEMON_REQUEST_BYTES, encode_json_line,
+    read_bounded_frame,
 };
 use theta::runtime::theta_socket_path;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -316,8 +317,12 @@ fn cleanup_socket_file(socket_path: &Path) {
 }
 
 fn parse_request_frame(frame: &[u8]) -> std::result::Result<DaemonRequest, DaemonResponse> {
-    serde_json::from_slice(frame)
-        .map_err(|e| DaemonResponse::error(format!("Invalid daemon request: {}", e)))
+    serde_json::from_slice(frame).map_err(|e| {
+        DaemonResponse::error(DaemonError::bad_request(format!(
+            "Invalid daemon request: {}",
+            e
+        )))
+    })
 }
 
 async fn handle_connection(stream: UnixStream, app: Arc<DaemonApp>) -> Result<()> {
@@ -335,7 +340,9 @@ async fn handle_connection(stream: UnixStream, app: Arc<DaemonApp>) -> Result<()
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(err) => {
-                let payload = encode_json_line(&DaemonResponse::error(err.to_string()))?;
+                let payload = encode_json_line(&DaemonResponse::error(DaemonError::bad_request(
+                    err.to_string(),
+                )))?;
                 let _ = writer.write_all(&payload).await;
                 break;
             }
@@ -354,12 +361,15 @@ async fn handle_connection(stream: UnixStream, app: Arc<DaemonApp>) -> Result<()
             Ok(Ok(val)) => DaemonResponse::success_value(val),
             Ok(Err(e)) => {
                 error!("SDK Proxy functional failure [{}]: {}", req.method, e);
-                DaemonResponse::error(e.to_string())
+                DaemonResponse::error(DaemonError::provider(req.method.clone(), e.to_string()))
             }
             Err(_) => {
                 error!("SDK Proxy call timed out [{}]", req.method);
                 app.sdk_manager.invalidate_ctx().await;
-                DaemonResponse::error("SDK operation timed out".to_string())
+                DaemonResponse::error(DaemonError::timeout(
+                    req.method.clone(),
+                    "SDK operation timed out",
+                ))
             }
         };
 
@@ -511,6 +521,7 @@ mod tests {
         assert!(
             err.error
                 .expect("error message")
+                .message
                 .contains("Invalid daemon request")
         );
     }

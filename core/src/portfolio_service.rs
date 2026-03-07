@@ -3,7 +3,7 @@ use crate::analytics::{
     ContractSide, PricingInput, calculate_metrics, implied_volatility_from_price,
 };
 use crate::ledger::Position;
-use crate::market_data::days_to_expiry;
+use crate::market_data::{OptionQuote, days_to_expiry, decimal_to_f64};
 use crate::rate::RateCurve;
 use crate::risk_domain::EnrichedPosition;
 use anyhow::{Context, Result, bail};
@@ -50,14 +50,7 @@ pub async fn enrich_positions(
         .context("failed to fetch option quotes")?;
 
     // Build option price map: symbol (no .US) → last_done price
-    let mut option_price_map: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
-    for oq in &option_quotes_vec {
-        let sym = oq.symbol.trim_end_matches(".US").to_string();
-        if let Ok(price) = oq.last_done.to_string().parse::<f64>() {
-            option_price_map.insert(sym, price);
-        }
-    }
+    let option_price_map = build_option_price_map(&option_quotes_vec)?;
 
     ensure_complete_quote_coverage(positions, &underlying_prices, &option_price_map)?;
 
@@ -126,6 +119,19 @@ fn ensure_complete_quote_coverage(
     }
 
     bail!("incomplete live quote coverage: {}", parts.join("; "))
+}
+
+fn build_option_price_map(
+    option_quotes: &[OptionQuote],
+) -> Result<std::collections::HashMap<String, f64>> {
+    let mut option_price_map = std::collections::HashMap::with_capacity(option_quotes.len());
+    for oq in option_quotes {
+        let sym = oq.symbol.trim_end_matches(".US").to_string();
+        let price = decimal_to_f64(&oq.last_done, "last_done")
+            .with_context(|| format!("invalid option quote price for {}", oq.symbol))?;
+        option_price_map.insert(sym, price);
+    }
+    Ok(option_price_map)
 }
 
 fn lp_sym(s: &str) -> String {
@@ -256,6 +262,7 @@ fn fallback_enriched(pos: &Position) -> EnrichedPosition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market_data::{OptionDirection, OptionQuote};
     use crate::rate::RateCurve;
 
     fn stock_position(symbol: &str) -> Position {
@@ -325,6 +332,38 @@ mod tests {
             std::collections::HashMap::from([("TSLA260320C00400000".to_string(), 12.5)]);
 
         ensure_complete_quote_coverage(&positions, &underlying_prices, &option_quotes).unwrap();
+    }
+
+    #[test]
+    fn build_option_price_map_rejects_non_finite_prices() {
+        let quotes = vec![OptionQuote {
+            symbol: "TSLA260320C00400000.US".to_string(),
+            underlying_symbol: "TSLA.US".to_string(),
+            direction: OptionDirection::Call,
+            last_done: "NaN".to_string(),
+            prev_close: "5.0".to_string(),
+            open: "5.0".to_string(),
+            high: "5.0".to_string(),
+            low: "5.0".to_string(),
+            volume: 1,
+            turnover: "1".to_string(),
+            timestamp: "2026-03-07T09:30:00Z".to_string(),
+            trade_status: serde_json::json!("Normal"),
+            strike_price: "400".to_string(),
+            expiry_date: time::macros::date!(2026 - 03 - 20),
+            implied_volatility: "0.4".to_string(),
+            open_interest: 1,
+            historical_volatility: "0.3".to_string(),
+            contract_multiplier: "100".to_string(),
+            contract_size: "100".to_string(),
+            contract_type: serde_json::json!("American"),
+        }];
+
+        let err = build_option_price_map(&quotes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid option quote price for TSLA260320C00400000.US")
+        );
     }
 
     #[test]

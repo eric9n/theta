@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use theta::daemon_protocol::is_transient_quote_rate_limit_message;
 use time::Date;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
@@ -147,7 +148,7 @@ impl<B: QuoteBackend, C: Clock> QuoteCache<B, C> {
                         }
                         Err(err) => {
                             let err_text = err.to_string();
-                            if is_rate_limit_error_text(&err_text) {
+                            if is_transient_quote_rate_limit_message(&err_text) {
                                 self.activate_option_quote_cooldown().await;
                                 warn!(
                                     method = "option_quote",
@@ -658,13 +659,6 @@ fn chain_info_key(symbol: &str, expiry: Date) -> String {
 
 fn normalize_symbol_key(symbol: &str) -> String {
     symbol.trim().to_ascii_uppercase()
-}
-
-fn is_rate_limit_error_text(text: &str) -> bool {
-    text.contains("301606")
-        || text.contains("301607")
-        || text.contains("Request rate limit")
-        || text.contains("Too many option securities request within one minute")
 }
 
 #[cfg(test)]

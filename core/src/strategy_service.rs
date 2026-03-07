@@ -9,6 +9,7 @@ use crate::domain::{
     DiagonalCallSpreadView, DiagonalPutSpreadCandidate, DiagonalPutSpreadView, MispricingCandidate,
     MispricingView, SellOpportunitiesView, SellOpportunityCandidate, SellOpportunityReturnBasis,
 };
+use crate::market_data::decimal_to_f64;
 use crate::screening_service::ChainScreeningRequest;
 use anyhow::{Result, bail};
 use std::collections::HashMap;
@@ -1707,6 +1708,10 @@ fn sort_diagonal_put_candidates(
     });
 }
 
+fn parse_strategy_decimal(value: &str, field: &str) -> Result<f64> {
+    decimal_to_f64(value, field).map_err(|err| anyhow::anyhow!("failed to parse {field}: {err}"))
+}
+
 fn build_cash_secured_put_view(
     analysis: ChainAnalysisView,
     dividend: f64,
@@ -1722,24 +1727,12 @@ fn build_cash_secured_put_view(
     min_abs_iv_diff_percent: Option<f64>,
     limit: Option<usize>,
 ) -> Result<CashSecuredPutView> {
-    let spot = analysis
-        .underlying_price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("failed to parse underlying price"))?;
+    let spot = parse_strategy_decimal(&analysis.underlying_price, "underlying price")?;
     let mut candidates = Vec::with_capacity(analysis.rows.len());
     for row in analysis.rows {
-        let strike_price_f64 = row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse strike price"))?;
-        let option_price_f64 = row
-            .option_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse option price"))?;
-        let provider_iv = row
-            .provider_reported_iv
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse provider iv"))?;
+        let strike_price_f64 = parse_strategy_decimal(&row.strike_price, "strike price")?;
+        let option_price_f64 = parse_strategy_decimal(&row.option_price, "option price")?;
+        let provider_iv = parse_strategy_decimal(&row.provider_reported_iv, "provider iv")?;
 
         let solved_iv = implied_volatility_from_price(
             spot,
@@ -1985,10 +1978,7 @@ fn build_mispricing_view(
     sort_by: Option<MispricingSortField>,
     limit: Option<usize>,
 ) -> Result<MispricingView> {
-    let spot = analysis
-        .underlying_price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("failed to parse underlying price"))?;
+    let spot = parse_strategy_decimal(&analysis.underlying_price, "underlying price")?;
 
     let mut candidates = Vec::with_capacity(analysis.rows.len());
     for row in analysis.rows {
@@ -1998,18 +1988,9 @@ fn build_mispricing_view(
             continue;
         }
 
-        let strike = row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse strike price"))?;
-        let option_price = row
-            .option_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse option price"))?;
-        let provider_iv = row
-            .provider_reported_iv
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse provider iv"))?;
+        let strike = parse_strategy_decimal(&row.strike_price, "strike price")?;
+        let option_price = parse_strategy_decimal(&row.option_price, "option price")?;
+        let provider_iv = parse_strategy_decimal(&row.provider_reported_iv, "provider iv")?;
 
         let solved_iv = implied_volatility_from_price(
             spot,
@@ -2122,9 +2103,14 @@ fn build_credit_spread_candidates(
     min_abs_mispricing_percent: Option<f64>,
     min_abs_iv_diff_percent: Option<f64>,
 ) -> Result<Vec<CreditSpreadCandidateCore>> {
+    for row in &rows {
+        parse_strategy_decimal(&row.strike_price, "spread strike price")?;
+    }
     rows.sort_by(|a, b| {
-        let a_strike = a.strike_price.parse::<f64>().unwrap_or(f64::NAN);
-        let b_strike = b.strike_price.parse::<f64>().unwrap_or(f64::NAN);
+        let a_strike = parse_strategy_decimal(&a.strike_price, "spread strike price")
+            .expect("spread strike price validated before sorting");
+        let b_strike = parse_strategy_decimal(&b.strike_price, "spread strike price")
+            .expect("spread strike price validated before sorting");
         match kind {
             CreditSpreadKind::BullPut => b_strike.total_cmp(&a_strike),
             CreditSpreadKind::BearCall => a_strike.total_cmp(&b_strike),
@@ -2139,18 +2125,10 @@ fn build_credit_spread_candidates(
             continue;
         }
 
-        let short_strike = short_row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse short strike price"))?;
-        let short_price = short_row
-            .option_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse short option price"))?;
-        let short_provider_iv = short_row
-            .provider_reported_iv
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse short provider iv"))?;
+        let short_strike = parse_strategy_decimal(&short_row.strike_price, "short strike price")?;
+        let short_price = parse_strategy_decimal(&short_row.option_price, "short option price")?;
+        let short_provider_iv =
+            parse_strategy_decimal(&short_row.provider_reported_iv, "short provider iv")?;
         let short_solved_iv = implied_volatility_from_price(
             spot,
             short_strike,
@@ -2189,14 +2167,8 @@ fn build_credit_spread_candidates(
                 continue;
             }
 
-            let long_strike = long_row
-                .strike_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse long strike price"))?;
-            let long_price = long_row
-                .option_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse long option price"))?;
+            let long_strike = parse_strategy_decimal(&long_row.strike_price, "long strike price")?;
+            let long_price = parse_strategy_decimal(&long_row.option_price, "long option price")?;
 
             let width_per_spread = match kind {
                 CreditSpreadKind::BullPut => (short_strike - long_strike) * 100.0,
@@ -2296,9 +2268,14 @@ fn build_debit_spread_candidates(
     min_annualized_return_on_risk: Option<f64>,
     max_annualized_return_on_risk: Option<f64>,
 ) -> Result<Vec<DebitSpreadCandidateCore>> {
+    for row in &rows {
+        parse_strategy_decimal(&row.strike_price, "spread strike price")?;
+    }
     rows.sort_by(|a, b| {
-        let a_strike = a.strike_price.parse::<f64>().unwrap_or(f64::NAN);
-        let b_strike = b.strike_price.parse::<f64>().unwrap_or(f64::NAN);
+        let a_strike = parse_strategy_decimal(&a.strike_price, "spread strike price")
+            .expect("spread strike price validated before sorting");
+        let b_strike = parse_strategy_decimal(&b.strike_price, "spread strike price")
+            .expect("spread strike price validated before sorting");
         match kind {
             DebitSpreadKind::BearPut => b_strike.total_cmp(&a_strike),
             DebitSpreadKind::BullCall => a_strike.total_cmp(&b_strike),
@@ -2313,14 +2290,8 @@ fn build_debit_spread_candidates(
             continue;
         }
 
-        let long_strike = long_row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse long strike price"))?;
-        let long_price = long_row
-            .option_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse long option price"))?;
+        let long_strike = parse_strategy_decimal(&long_row.strike_price, "long strike price")?;
+        let long_price = parse_strategy_decimal(&long_row.option_price, "long option price")?;
 
         for short_row in rows.iter().skip(long_index + 1) {
             if !matches_min_count(short_row.open_interest, min_open_interest)
@@ -2329,14 +2300,10 @@ fn build_debit_spread_candidates(
                 continue;
             }
 
-            let short_strike = short_row
-                .strike_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse short strike price"))?;
-            let short_price = short_row
-                .option_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse short option price"))?;
+            let short_strike =
+                parse_strategy_decimal(&short_row.strike_price, "short strike price")?;
+            let short_price =
+                parse_strategy_decimal(&short_row.option_price, "short option price")?;
 
             let width_per_spread = match kind {
                 DebitSpreadKind::BearPut => (long_strike - short_strike) * 100.0,
@@ -2469,10 +2436,7 @@ fn build_calendar_spread_candidates(
             continue;
         }
 
-        let near_strike = near_row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse near strike price"))?;
+        let near_strike = parse_strategy_decimal(&near_row.strike_price, "near strike price")?;
 
         for far_row in &far_rows {
             if !matches_min_count(far_row.open_interest, min_open_interest)
@@ -2481,10 +2445,7 @@ fn build_calendar_spread_candidates(
                 continue;
             }
 
-            let far_strike = far_row
-                .strike_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse far strike price"))?;
+            let far_strike = parse_strategy_decimal(&far_row.strike_price, "far strike price")?;
 
             let strike_matches = match pairing {
                 DualExpiryPairing::CalendarSameStrike => (far_strike - near_strike).abs() < 1.0e-9,
@@ -2501,14 +2462,8 @@ fn build_calendar_spread_candidates(
                 continue;
             }
 
-            let near_price = near_row
-                .option_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse near option price"))?;
-            let far_price = far_row
-                .option_price
-                .parse::<f64>()
-                .map_err(|_| anyhow::anyhow!("failed to parse far option price"))?;
+            let near_price = parse_strategy_decimal(&near_row.option_price, "near option price")?;
+            let far_price = parse_strategy_decimal(&far_row.option_price, "far option price")?;
             let net_debit_per_spread = (far_price - near_price) * 100.0;
             if net_debit_per_spread <= 0.0
                 || !matches_max_threshold(net_debit_per_spread, max_net_debit_per_spread)
@@ -2589,25 +2544,14 @@ fn build_covered_call_view(
     min_abs_iv_diff_percent: Option<f64>,
     limit: Option<usize>,
 ) -> Result<CoveredCallView> {
-    let underlying_price_f64 = analysis
-        .underlying_price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("failed to parse underlying price"))?;
+    let underlying_price_f64 =
+        parse_strategy_decimal(&analysis.underlying_price, "underlying price")?;
 
     let mut candidates = Vec::with_capacity(analysis.rows.len());
     for row in analysis.rows {
-        let strike_price_f64 = row
-            .strike_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse strike price"))?;
-        let option_price_f64 = row
-            .option_price
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse option price"))?;
-        let provider_iv = row
-            .provider_reported_iv
-            .parse::<f64>()
-            .map_err(|_| anyhow::anyhow!("failed to parse provider iv"))?;
+        let strike_price_f64 = parse_strategy_decimal(&row.strike_price, "strike price")?;
+        let option_price_f64 = parse_strategy_decimal(&row.option_price, "option price")?;
+        let provider_iv = parse_strategy_decimal(&row.provider_reported_iv, "provider iv")?;
 
         let solved_iv = implied_volatility_from_price(
             underlying_price_f64,
@@ -2734,10 +2678,7 @@ fn build_bull_put_spread_view(
     min_abs_iv_diff_percent: Option<f64>,
     limit: Option<usize>,
 ) -> Result<BullPutSpreadView> {
-    let spot = analysis
-        .underlying_price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("failed to parse underlying price"))?;
+    let spot = parse_strategy_decimal(&analysis.underlying_price, "underlying price")?;
     let mut candidates: Vec<BullPutSpreadCandidate> = build_credit_spread_candidates(
         analysis.rows,
         CreditSpreadKind::BullPut,
@@ -2818,10 +2759,7 @@ fn build_bear_call_spread_view(
     min_abs_iv_diff_percent: Option<f64>,
     limit: Option<usize>,
 ) -> Result<BearCallSpreadView> {
-    let spot = analysis
-        .underlying_price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("failed to parse underlying price"))?;
+    let spot = parse_strategy_decimal(&analysis.underlying_price, "underlying price")?;
     let mut candidates: Vec<BearCallSpreadCandidate> = build_credit_spread_candidates(
         analysis.rows,
         CreditSpreadKind::BearCall,
@@ -3588,6 +3526,35 @@ mod tests {
     }
 
     #[test]
+    fn cash_secured_put_view_rejects_non_finite_underlying_price() {
+        let err = build_cash_secured_put_view(
+            ChainAnalysisView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "NaN".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                rows: vec![sample_row("PUT", "2.0", "380")],
+            },
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("failed to parse underlying price"));
+    }
+
+    #[test]
     fn sorts_covered_calls_by_annualized_premium_yield() {
         let view = build_covered_call_view(
             ChainAnalysisView {
@@ -3621,6 +3588,36 @@ mod tests {
         assert_eq!(view.candidates[1].option_symbol, "LOW");
         assert!((view.candidates[0].breakeven - 398.0).abs() < 0.0001);
         assert!((view.candidates[0].max_loss_per_contract - 39_800.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn covered_call_view_rejects_non_finite_option_price() {
+        let err = build_covered_call_view(
+            ChainAnalysisView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                rows: vec![sample_call_row("BROKEN", "NaN", "420")],
+            },
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("failed to parse option price"));
     }
 
     #[test]
@@ -3689,6 +3686,41 @@ mod tests {
         assert_eq!(view.candidates.len(), 1);
         assert_eq!(view.candidates[0].short_option_symbol, "SHORT");
         assert_eq!(view.candidates[0].long_option_symbol, "LONG");
+    }
+
+    #[test]
+    fn bull_put_spread_view_rejects_non_finite_strike_price() {
+        let err = build_bull_put_spread_view(
+            ChainAnalysisView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                rows: vec![
+                    sample_row("SHORT", "2.5", "390"),
+                    sample_row("BROKEN", "1.0", "NaN"),
+                ],
+            },
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to parse spread strike price")
+        );
     }
 
     #[test]
@@ -3790,6 +3822,39 @@ mod tests {
         assert_eq!(view.candidates.len(), 1);
         assert_eq!(view.candidates[0].long_option_symbol, "LONG");
         assert_eq!(view.candidates[0].short_option_symbol, "SHORT");
+    }
+
+    #[test]
+    fn bull_call_spread_view_rejects_non_finite_strike_price() {
+        let err = build_bull_call_spread_view(
+            ChainAnalysisView {
+                underlying_symbol: "TSLA.US".to_string(),
+                underlying_price: "400".to_string(),
+                expiry: "2026-03-20".to_string(),
+                days_to_expiry: 30,
+                rate: 0.04,
+                rate_source: "curve_default".to_string(),
+                rows: vec![
+                    sample_call_row("LONG", "2.5", "410"),
+                    sample_call_row("BROKEN", "1.0", "NaN"),
+                ],
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to parse spread strike price")
+        );
     }
 
     #[test]

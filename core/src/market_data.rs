@@ -224,7 +224,7 @@ impl MarketDataClient {
             .with_context(|| format!("Failed to parse daemon response for {}", method))?;
 
         if let Some(err) = resp.error {
-            bail!("SDK Proxy Error [{}]: {}", method, err);
+            return Err(anyhow!(err));
         }
 
         let result = resp.result.context("Daemon returned empty result")?;
@@ -264,10 +264,10 @@ impl MarketDataClient {
         let quotes: Vec<SecurityQuote> = self.rpc_call("quote", symbols.to_vec()).await?;
         let mut map = std::collections::HashMap::new();
         for q in quotes {
-            if let Ok(price) = decimal_to_f64(&q.last_done, "last_done") {
-                let sym = q.symbol.trim_end_matches(".US").to_string();
-                map.insert(sym, price);
-            }
+            let price = decimal_to_f64(&q.last_done, "last_done")
+                .with_context(|| format!("invalid batch quote price for {}", q.symbol))?;
+            let sym = q.symbol.trim_end_matches(".US").to_string();
+            map.insert(sym, price);
         }
         Ok(map)
     }
@@ -439,7 +439,13 @@ pub fn provider_greeks_view(row: SecurityCalcIndex) -> ProviderGreeks {
 }
 
 pub fn decimal_to_f64(value: &str, field: &str) -> Result<f64> {
-    value.parse().with_context(|| format!("parse {}", field))
+    let parsed = value
+        .parse::<f64>()
+        .with_context(|| format!("parse {}", field))?;
+    if !parsed.is_finite() {
+        bail!("{field} must be finite");
+    }
+    Ok(parsed)
 }
 
 pub fn parse_expiry_date(input: &str) -> Result<Date> {
@@ -448,9 +454,18 @@ pub fn parse_expiry_date(input: &str) -> Result<Date> {
 }
 
 pub fn days_to_expiry(expiry: Date) -> i64 {
-    let today = OffsetDateTime::now_utc().date();
+    days_to_expiry_from(expiry, OffsetDateTime::now_utc().date())
+}
+
+fn days_to_expiry_from(expiry: Date, today: Date) -> i64 {
     let days = (expiry - today).whole_days();
-    if days < 1 { 1 } else { days }
+    if days < 0 {
+        0
+    } else if days == 0 {
+        1
+    } else {
+        days
+    }
 }
 
 fn dedup_symbols(symbols: &[String]) -> Vec<String> {
@@ -614,11 +629,12 @@ where
 mod tests {
     use super::{
         CLIENT_RPC_TIMEOUT, MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST, MarketDataClient,
-        MarketTradingDays, OptionChainFetchFilter, OptionDirection, OptionQuote, StrikePriceInfo,
-        dedup_symbols, option_snapshot_from_quote, select_option_symbols,
+        MarketTradingDays, OptionChainFetchFilter, OptionDirection, OptionQuote, SecurityQuote,
+        StrikePriceInfo, decimal_to_f64, dedup_symbols, option_snapshot_from_quote,
+        select_option_symbols,
     };
     use crate::analytics::ContractSide;
-    use crate::daemon_protocol::MAX_DAEMON_RESPONSE_BYTES;
+    use crate::daemon_protocol::{DaemonError, DaemonErrorKind, MAX_DAEMON_RESPONSE_BYTES};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -760,6 +776,30 @@ mod tests {
     }
 
     #[test]
+    fn decimal_to_f64_rejects_non_finite_values() {
+        assert!(decimal_to_f64("NaN", "last_done").is_err());
+        assert!(decimal_to_f64("inf", "last_done").is_err());
+    }
+
+    #[test]
+    fn snapshot_from_quote_rejects_non_finite_prices() {
+        let err = super::snapshot_from_quote(SecurityQuote {
+            symbol: "TSLA.US".to_string(),
+            last_done: "NaN".to_string(),
+            prev_close: "390".to_string(),
+            open: "395".to_string(),
+            high: "405".to_string(),
+            low: "392".to_string(),
+            volume: 1,
+            turnover: "1".to_string(),
+            timestamp: "2026-02-28T09:30:00Z".to_string(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("last_done must be finite"));
+    }
+
+    #[test]
     fn socket_path_prefers_env_override() {
         let _guard = env_lock().lock().expect("lock poisoned");
         unsafe {
@@ -830,6 +870,22 @@ mod tests {
         assert_eq!(MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST, 500);
     }
 
+    #[test]
+    fn days_to_expiry_returns_zero_for_expired_contracts() {
+        let today = time::macros::date!(2026 - 03 - 07);
+        let expiry = time::macros::date!(2026 - 03 - 06);
+
+        assert_eq!(super::days_to_expiry_from(expiry, today), 0);
+    }
+
+    #[test]
+    fn days_to_expiry_treats_same_day_as_one_day() {
+        let today = time::macros::date!(2026 - 03 - 07);
+        let expiry = time::macros::date!(2026 - 03 - 07);
+
+        assert_eq!(super::days_to_expiry_from(expiry, today), 1);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn rejects_malformed_daemon_response() {
         let (_dir, path, listener) = bind_test_listener().await;
@@ -848,6 +904,38 @@ mod tests {
             .await
             .expect_err("malformed response should fail");
         assert!(err.to_string().contains("Failed to parse daemon response"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn surfaces_structured_daemon_errors() {
+        let (_dir, path, listener) = bind_test_listener().await;
+        let client = MarketDataClient::for_tests(path);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let payload = serde_json::json!({
+                "result": null,
+                "error": {
+                    "kind": "rate_limit",
+                    "method": "option_quote",
+                    "provider_code": 301607,
+                    "message": "Too many option securities request within one minute"
+                }
+            });
+            let payload = serde_json::to_vec(&payload).expect("serialize payload");
+            stream.write_all(&payload).await.expect("write payload");
+            stream.write_all(b"\n").await.expect("write newline");
+        });
+
+        let err = client
+            .fetch_option_expiries("TSLA.US")
+            .await
+            .expect_err("structured error should fail");
+        let daemon_err = err
+            .downcast_ref::<DaemonError>()
+            .expect("daemon error should be downcastable");
+        assert_eq!(daemon_err.kind, DaemonErrorKind::RateLimit);
+        assert_eq!(daemon_err.provider_code, Some(301607));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -887,5 +975,41 @@ mod tests {
             .await
             .expect_err("missing response should time out");
         assert!(err.to_string().contains("timed out"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_quote_rejects_non_finite_prices() {
+        let (_dir, path, listener) = bind_test_listener().await;
+        let client = MarketDataClient::for_tests(path);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let payload = serde_json::json!({
+                "result": [{
+                    "symbol": "TSLA.US",
+                    "last_done": "NaN",
+                    "prev_close": "390",
+                    "open": "395",
+                    "high": "405",
+                    "low": "392",
+                    "volume": 1,
+                    "turnover": "1",
+                    "timestamp": "2026-02-28T09:30:00Z"
+                }],
+                "error": null
+            });
+            let mut bytes = serde_json::to_vec(&payload).expect("serialize payload");
+            bytes.push(b'\n');
+            stream.write_all(&bytes).await.expect("write response");
+        });
+
+        let err = client
+            .batch_quote(&["TSLA.US".to_string()])
+            .await
+            .expect_err("non-finite prices should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid batch quote price for TSLA.US")
+        );
     }
 }

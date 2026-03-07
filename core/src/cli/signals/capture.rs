@@ -1,3 +1,4 @@
+use crate::daemon_protocol::is_transient_quote_rate_limit_error as is_transient_quote_limit_error;
 use crate::signal_service::{MarketToneRequest, ThetaSignalService};
 use crate::snapshot_store::SignalSnapshotStore;
 use anyhow::{Error, Result};
@@ -186,14 +187,6 @@ fn should_sleep_after_symbol(index: usize, symbol_count: usize, loop_enabled: bo
     }
 
     index + 1 <= symbol_count
-}
-
-fn is_transient_quote_limit_error(err: &Error) -> bool {
-    let text = err.to_string();
-    text.contains("301606")
-        || text.contains("301607")
-        || text.contains("Request rate limit")
-        || text.contains("Too many option securities request within one minute")
 }
 
 fn is_us_regular_market_hours(now_utc: OffsetDateTime) -> bool {

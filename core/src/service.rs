@@ -61,6 +61,9 @@ impl ThetaService {
             .fetch_underlying(&contract.underlying_symbol)
             .await?;
         let days = days_to_expiry(contract.expiry);
+        if days == 0 {
+            bail!("contract {} is expired", contract.symbol);
+        }
         let (effective_iv, iv_source, iv_reference_price) = resolve_iv(
             req.iv,
             req.iv_from_option_price,
@@ -155,6 +158,9 @@ impl ThetaService {
                 },
             )
             .await?;
+        if chain.days_to_expiry == 0 {
+            bail!("option chain expiry {} is expired", chain.expiry);
+        }
         let mut metas = Vec::with_capacity(chain.contracts.len());
         let mut inputs = Vec::with_capacity(chain.contracts.len());
 

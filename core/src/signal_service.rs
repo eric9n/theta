@@ -1,5 +1,8 @@
 use crate::analysis_service::{AnalyzeChainRequest, ThetaAnalysisService};
 use crate::analytics::ContractSide;
+use crate::daemon_protocol::{
+    is_provider_code, is_transient_quote_rate_limit_error as is_transient_quote_limit_error,
+};
 use crate::domain::{
     ChainAnalysisRow, MarketToneSummary, MarketToneView, PutCallBiasView, PutCallSideTotals,
     SkewLegPoint, SkewSignalView, SmilePoint, SmileSignalView, TermStructurePoint,
@@ -326,30 +329,28 @@ impl ThetaSignalService {
 
                 match self
                     .adaptive_analyze_chain(
-                    expiry,
-                    AnalyzeChainRequest {
-                        symbol: symbol.clone(),
-                        rate,
-                        dividend,
-                        iv,
-                        iv_from_market_price,
-                        screening: ChainScreeningRequest {
-                            only_liquid: true,
-                            exclude_abnormal: true,
-                            exclude_near_expiry: true,
-                            min_otm_percent: Some(-0.15), // Term structure can be +/- 15%
-                            max_otm_percent: Some(0.15),
-                            ..Default::default()
+                        expiry,
+                        AnalyzeChainRequest {
+                            symbol: symbol.clone(),
+                            rate,
+                            dividend,
+                            iv,
+                            iv_from_market_price,
+                            screening: ChainScreeningRequest {
+                                only_liquid: true,
+                                exclude_abnormal: true,
+                                exclude_near_expiry: true,
+                                min_otm_percent: Some(-0.15), // Term structure can be +/- 15%
+                                max_otm_percent: Some(0.15),
+                                ..Default::default()
+                            },
                         },
-                    },
-                )
-                .await
+                    )
+                    .await
                 {
                     Ok(view) => view,
                     Err(err)
-                        if i > 0
-                            && !points.is_empty()
-                            && is_transient_quote_limit_error(&err) =>
+                        if i > 0 && !points.is_empty() && is_transient_quote_limit_error(&err) =>
                     {
                         tracing::warn!(
                             "Stopping term structure early for {} after {} points due to transient quote limit at expiry {}: {}",
@@ -390,7 +391,7 @@ impl ThetaSignalService {
 
             match self.analysis.analyze_chain(expiry, req.clone()).await {
                 Ok(view) => return Ok(view),
-                Err(e) if e.to_string().contains("301607") && otm_range > min_range => {
+                Err(e) if is_provider_code(&e, 301607) && otm_range > min_range => {
                     tracing::warn!(
                         "Hit 301607 error for {} @ {} with range +/- {:.2}%. Narrowing range and retrying...",
                         req.symbol,
@@ -407,14 +408,6 @@ impl ThetaSignalService {
             }
         }
     }
-}
-
-fn is_transient_quote_limit_error(err: &anyhow::Error) -> bool {
-    let text = err.to_string();
-    text.contains("301606")
-        || text.contains("301607")
-        || text.contains("Request rate limit")
-        || text.contains("Too many option securities request within one minute")
 }
 
 fn validate_skew_request(req: &SkewSignalRequest) -> Result<()> {

@@ -17,6 +17,12 @@ pub fn analyze_contract(
     let zero_volume = contract.volume <= 0;
     let zero_open_interest = contract.open_interest <= 0;
     let non_positive_iv = contract.provider_reported_iv_f64 <= 0.0;
+    let intrinsic_value = match contract.option_type {
+        ContractSide::Call => (underlying_price - contract.strike_price_f64).max(0.0),
+        ContractSide::Put => (contract.strike_price_f64 - underlying_price).max(0.0),
+    };
+    let extrinsic_value = contract.last_done_f64 - intrinsic_value;
+    let below_intrinsic_value = extrinsic_value < -1.0e-9;
     let non_standard_contract = !matches!(
         contract.contract_style.as_str(),
         "American" | "European" | "Europe"
@@ -34,11 +40,6 @@ pub fn analyze_contract(
         f64::NAN
     };
 
-    let intrinsic_value = match contract.option_type {
-        ContractSide::Call => (underlying_price - contract.strike_price_f64).max(0.0),
-        ContractSide::Put => (contract.strike_price_f64 - underlying_price).max(0.0),
-    };
-    let extrinsic_value = (contract.last_done_f64 - intrinsic_value).max(0.0);
     let breakeven = match contract.option_type {
         ContractSide::Call => contract.strike_price_f64 + contract.last_done_f64,
         ContractSide::Put => contract.strike_price_f64 - contract.last_done_f64,
@@ -47,6 +48,9 @@ pub fn analyze_contract(
     let mut quality_flags = Vec::new();
     if non_positive_iv {
         quality_flags.push("non_positive_iv".to_string());
+    }
+    if below_intrinsic_value {
+        quality_flags.push("below_intrinsic_value".to_string());
     }
     if non_standard_contract {
         quality_flags.push("non_standard_contract".to_string());
@@ -74,6 +78,7 @@ pub fn analyze_contract(
         zero_volume,
         zero_open_interest,
         non_positive_iv,
+        below_intrinsic_value,
         non_standard_contract,
         halted_or_abnormal_trade_status,
         near_expiry,
@@ -123,7 +128,9 @@ fn matches_filter(
         return false;
     }
     if filter.exclude_abnormal
-        && (diagnostics.halted_or_abnormal_trade_status || diagnostics.non_standard_contract)
+        && (diagnostics.halted_or_abnormal_trade_status
+            || diagnostics.non_standard_contract
+            || diagnostics.below_intrinsic_value)
     {
         return false;
     }
@@ -182,6 +189,28 @@ mod tests {
         assert_eq!(diagnostics.intrinsic_value, 0.0);
         assert_eq!(diagnostics.extrinsic_value, 2.5);
         assert_eq!(diagnostics.breakeven, 377.5);
+        assert!(!diagnostics.below_intrinsic_value);
+    }
+
+    #[test]
+    fn flags_contracts_priced_below_intrinsic_value() {
+        let mut contract = build_contract("C1", ContractSide::Call);
+        contract.strike_price = "350".to_string();
+        contract.strike_price_f64 = 350.0;
+        contract.last_done = "40".to_string();
+        contract.last_done_f64 = 40.0;
+
+        let diagnostics = analyze_contract(&contract, 400.0, 20);
+
+        assert!(diagnostics.below_intrinsic_value);
+        assert_eq!(diagnostics.intrinsic_value, 50.0);
+        assert_eq!(diagnostics.extrinsic_value, -10.0);
+        assert!(
+            diagnostics
+                .quality_flags
+                .iter()
+                .any(|flag| flag == "below_intrinsic_value")
+        );
     }
 
     #[test]
@@ -234,6 +263,52 @@ mod tests {
         assert!(chain.rows[0].call.is_none());
         assert!(chain.rows[0].call_diagnostics.is_none());
         assert!(chain.rows[0].put.is_some());
+    }
+
+    #[test]
+    fn exclude_abnormal_filters_below_intrinsic_contracts() {
+        let mut chain = NormalizedOptionChainSnapshot {
+            underlying: UnderlyingSnapshot {
+                symbol: "TSLA.US".to_string(),
+                last_done: "400".to_string(),
+                last_done_f64: 400.0,
+                prev_close: "390".to_string(),
+                prev_close_f64: 390.0,
+                open: "395".to_string(),
+                open_f64: 395.0,
+                high: "405".to_string(),
+                high_f64: 405.0,
+                low: "392".to_string(),
+                low_f64: 392.0,
+                volume: 1,
+                turnover: "1".to_string(),
+                turnover_f64: 1.0,
+                timestamp: "2026-02-28 09:30:00".to_string(),
+            },
+            expiry: Date::from_calendar_date(2026, time::Month::March, 20).expect("valid date"),
+            days_to_expiry: 20,
+            rows: vec![OptionChainStrikeRow {
+                strike_price: "350".to_string(),
+                strike_price_f64: 350.0,
+                call: Some(build_contract("C1", ContractSide::Call)),
+                call_diagnostics: Some(ContractDiagnostics {
+                    below_intrinsic_value: true,
+                    ..ContractDiagnostics::default()
+                }),
+                put: None,
+                put_diagnostics: None,
+            }],
+        };
+
+        apply_normalized_chain_diagnostics_filter(
+            &mut chain,
+            NormalizedChainDiagnosticsFilter {
+                exclude_abnormal: true,
+                ..NormalizedChainDiagnosticsFilter::default()
+            },
+        );
+
+        assert!(chain.rows.is_empty());
     }
 
     fn build_contract(symbol: &str, option_type: ContractSide) -> OptionContractSnapshot {

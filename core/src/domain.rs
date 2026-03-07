@@ -90,6 +90,7 @@ pub struct ContractDiagnostics {
     pub zero_volume: bool,
     pub zero_open_interest: bool,
     pub non_positive_iv: bool,
+    pub below_intrinsic_value: bool,
     pub non_standard_contract: bool,
     pub halted_or_abnormal_trade_status: bool,
     pub near_expiry: bool,
