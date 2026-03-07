@@ -3,7 +3,7 @@ use crate::analytics::{
     implied_volatility_from_price,
 };
 use crate::domain::{ChainAnalysisRow, ChainAnalysisView, IvComparison, OptionAnalysisView};
-use crate::market_data::{MarketDataClient, days_to_expiry};
+use crate::market_data::{MarketDataClient, OptionChainFetchFilter, days_to_expiry};
 use anyhow::{bail, Result};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -141,7 +141,20 @@ impl ThetaService {
             bail!("min_strike must be less than or equal to max_strike");
         }
 
-        let chain = self.market.fetch_option_chain(&req.symbol, expiry).await?;
+        let chain = self
+            .market
+            .fetch_option_chain_filtered(
+                &req.symbol,
+                expiry,
+                OptionChainFetchFilter {
+                    side: req.side,
+                    min_strike: req.min_strike,
+                    max_strike: req.max_strike,
+                    min_otm_percent: None,
+                    max_otm_percent: None,
+                },
+            )
+            .await?;
         let mut metas = Vec::with_capacity(chain.contracts.len());
         let mut inputs = Vec::with_capacity(chain.contracts.len());
 

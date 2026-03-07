@@ -4,7 +4,7 @@ use crate::analytics::{
 use crate::config::AppConfig;
 use crate::diagnostics::analyze_contract;
 use crate::domain::{ChainAnalysisRow, ChainAnalysisView, IvComparison, OptionAnalysisView};
-use crate::market_data::{MarketDataClient, days_to_expiry};
+use crate::market_data::{MarketDataClient, OptionChainFetchFilter, days_to_expiry};
 use crate::rate::RateCurve;
 use crate::screening_service::{
     ChainScreeningRequest, apply_chain_screening, validate_metric_bounds, validate_strike_bounds,
@@ -171,7 +171,20 @@ impl ThetaAnalysisService {
             "otm_percent",
         )?;
 
-        let chain = self.market.fetch_option_chain(&req.symbol, expiry).await?;
+        let chain = self
+            .market
+            .fetch_option_chain_filtered(
+                &req.symbol,
+                expiry,
+                OptionChainFetchFilter {
+                    side: req.screening.side,
+                    min_strike: req.screening.min_strike,
+                    max_strike: req.screening.max_strike,
+                    min_otm_percent: req.screening.min_otm_percent,
+                    max_otm_percent: req.screening.max_otm_percent,
+                },
+            )
+            .await?;
         let (rate, rate_source) = resolve_rate(req.rate, self.rate_curve, chain.days_to_expiry);
         let mut metas = Vec::with_capacity(chain.contracts.len());
         let mut inputs = Vec::with_capacity(chain.contracts.len());

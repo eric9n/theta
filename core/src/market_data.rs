@@ -109,6 +109,16 @@ pub struct StrikePriceInfo {
 
 const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_RPC_TIMEOUT: Duration = Duration::from_secs(12);
+const MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST: usize = 500;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptionChainFetchFilter {
+    pub side: Option<ContractSide>,
+    pub min_strike: Option<f64>,
+    pub max_strike: Option<f64>,
+    pub min_otm_percent: Option<f64>,
+    pub max_otm_percent: Option<f64>,
+}
 
 /// A pure UDS Proxy Client for the LongPort SDK.
 /// This is the only implementation allowed in the application layer.
@@ -266,7 +276,16 @@ impl MarketDataClient {
         if symbols.is_empty() {
             return Ok(vec![]);
         }
-        self.rpc_call("option_quote", symbols.to_vec()).await
+        let symbols = dedup_symbols(symbols);
+        let mut quotes = Vec::new();
+
+        for chunk in symbols.chunks(MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST) {
+            let mut chunk_quotes: Vec<OptionQuote> =
+                self.rpc_call("option_quote", chunk.to_vec()).await?;
+            quotes.append(&mut chunk_quotes);
+        }
+
+        Ok(quotes)
     }
 
     pub async fn fetch_provider_greeks(&self, symbol: &str) -> Result<ProviderGreeks> {
@@ -307,6 +326,16 @@ impl MarketDataClient {
         symbol: &str,
         expiry: Date,
     ) -> Result<OptionChainSnapshot> {
+        self.fetch_option_chain_filtered(symbol, expiry, OptionChainFetchFilter::default())
+            .await
+    }
+
+    pub async fn fetch_option_chain_filtered(
+        &self,
+        symbol: &str,
+        expiry: Date,
+        filter: OptionChainFetchFilter,
+    ) -> Result<OptionChainSnapshot> {
         let underlying = self.fetch_underlying(symbol).await?;
         let days_to_expiry = days_to_expiry(expiry);
 
@@ -320,10 +349,7 @@ impl MarketDataClient {
             )
             .await?;
 
-        let option_symbols: Vec<String> = info
-            .iter()
-            .flat_map(|s| [s.call_symbol.clone(), s.put_symbol.clone()])
-            .collect();
+        let option_symbols = select_option_symbols(&info, underlying.last_done_f64, filter);
         let option_quotes = self.batch_option_quote(&option_symbols).await?;
 
         let mut contracts = Vec::with_capacity(option_quotes.len());
@@ -427,6 +453,128 @@ pub fn days_to_expiry(expiry: Date) -> i64 {
     if days < 1 { 1 } else { days }
 }
 
+fn dedup_symbols(symbols: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        if seen.insert(symbol.as_str()) {
+            deduped.push(symbol.clone());
+        }
+    }
+    deduped
+}
+
+fn select_option_symbols(
+    info: &[StrikePriceInfo],
+    underlying_spot: f64,
+    filter: OptionChainFetchFilter,
+) -> Vec<String> {
+    let mut selected = Vec::new();
+
+    for row in info {
+        let Ok(strike) = decimal_to_f64(&row.strike_price, "strike_price") else {
+            continue;
+        };
+
+        if !matches_strike_filter(strike, filter.min_strike, filter.max_strike) {
+            continue;
+        }
+
+        match filter.side {
+            Some(ContractSide::Call) => {
+                if matches_otm_filter(
+                    ContractSide::Call,
+                    strike,
+                    underlying_spot,
+                    filter.min_otm_percent,
+                    filter.max_otm_percent,
+                ) {
+                    selected.push(row.call_symbol.clone());
+                }
+            }
+            Some(ContractSide::Put) => {
+                if matches_otm_filter(
+                    ContractSide::Put,
+                    strike,
+                    underlying_spot,
+                    filter.min_otm_percent,
+                    filter.max_otm_percent,
+                ) {
+                    selected.push(row.put_symbol.clone());
+                }
+            }
+            None => {
+                if matches_otm_filter(
+                    ContractSide::Call,
+                    strike,
+                    underlying_spot,
+                    filter.min_otm_percent,
+                    filter.max_otm_percent,
+                ) {
+                    selected.push(row.call_symbol.clone());
+                }
+                if matches_otm_filter(
+                    ContractSide::Put,
+                    strike,
+                    underlying_spot,
+                    filter.min_otm_percent,
+                    filter.max_otm_percent,
+                ) {
+                    selected.push(row.put_symbol.clone());
+                }
+            }
+        }
+    }
+
+    dedup_symbols(&selected)
+}
+
+fn matches_strike_filter(strike: f64, min_strike: Option<f64>, max_strike: Option<f64>) -> bool {
+    if let Some(min) = min_strike
+        && strike < min
+    {
+        return false;
+    }
+    if let Some(max) = max_strike
+        && strike > max
+    {
+        return false;
+    }
+    true
+}
+
+fn matches_otm_filter(
+    side: ContractSide,
+    strike: f64,
+    underlying_spot: f64,
+    min_otm_percent: Option<f64>,
+    max_otm_percent: Option<f64>,
+) -> bool {
+    if min_otm_percent.is_none() && max_otm_percent.is_none() {
+        return true;
+    }
+    if !underlying_spot.is_finite() || underlying_spot <= 0.0 {
+        return false;
+    }
+
+    let otm_percent = match side {
+        ContractSide::Call => (strike - underlying_spot) / underlying_spot,
+        ContractSide::Put => (underlying_spot - strike) / underlying_spot,
+    };
+
+    if let Some(min) = min_otm_percent
+        && otm_percent < min
+    {
+        return false;
+    }
+    if let Some(max) = max_otm_percent
+        && otm_percent > max
+    {
+        return false;
+    }
+    true
+}
+
 fn verify_socket_path_exists(socket_path: &Path) -> Result<()> {
     if !socket_path.exists() {
         bail!(
@@ -465,9 +613,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CLIENT_RPC_TIMEOUT, MarketDataClient, MarketTradingDays, OptionDirection, OptionQuote,
-        option_snapshot_from_quote,
+        CLIENT_RPC_TIMEOUT, MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST, MarketDataClient,
+        MarketTradingDays, OptionChainFetchFilter, OptionDirection, OptionQuote, StrikePriceInfo,
+        dedup_symbols, option_snapshot_from_quote, select_option_symbols,
     };
+    use crate::analytics::ContractSide;
     use crate::daemon_protocol::MAX_DAEMON_RESPONSE_BYTES;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
@@ -619,6 +769,65 @@ mod tests {
 
         let resolved = crate::runtime::theta_socket_path().expect("socket path");
         assert_eq!(resolved, PathBuf::from("/tmp/test-theta.sock"));
+    }
+
+    #[test]
+    fn dedup_symbols_preserves_first_seen_order() {
+        let symbols = vec![
+            "A.US".to_string(),
+            "B.US".to_string(),
+            "A.US".to_string(),
+            "C.US".to_string(),
+            "B.US".to_string(),
+        ];
+
+        assert_eq!(
+            dedup_symbols(&symbols),
+            vec!["A.US".to_string(), "B.US".to_string(), "C.US".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_option_symbols_applies_side_and_otm_filters_before_quote() {
+        let info = vec![
+            StrikePriceInfo {
+                strike_price: "350".to_string(),
+                call_symbol: "TSLA250101C350000.US".to_string(),
+                put_symbol: "TSLA250101P350000.US".to_string(),
+                standard: true,
+            },
+            StrikePriceInfo {
+                strike_price: "400".to_string(),
+                call_symbol: "TSLA250101C400000.US".to_string(),
+                put_symbol: "TSLA250101P400000.US".to_string(),
+                standard: true,
+            },
+            StrikePriceInfo {
+                strike_price: "450".to_string(),
+                call_symbol: "TSLA250101C450000.US".to_string(),
+                put_symbol: "TSLA250101P450000.US".to_string(),
+                standard: true,
+            },
+        ];
+
+        let selected = select_option_symbols(
+            &info,
+            400.0,
+            OptionChainFetchFilter {
+                side: Some(ContractSide::Call),
+                min_strike: None,
+                max_strike: None,
+                min_otm_percent: Some(0.0),
+                max_otm_percent: Some(0.10),
+            },
+        );
+
+        assert_eq!(selected, vec!["TSLA250101C400000.US".to_string()]);
+    }
+
+    #[test]
+    fn option_quote_batch_size_matches_longport_limit() {
+        assert_eq!(MAX_OPTION_QUOTE_SYMBOLS_PER_REQUEST, 500);
     }
 
     #[tokio::test(flavor = "current_thread")]
