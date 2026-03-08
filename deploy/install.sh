@@ -98,13 +98,11 @@ install_bundle() {
   install -m 0755 "${bundle_dir}/bin/theta" "${PREFIX}/theta"
   install -m 0755 "${bundle_dir}/bin/theta-daemon" "${PREFIX}/theta-daemon"
   install -m 0755 "${bundle_dir}/bin/theta-mcp" "${PREFIX}/theta-mcp"
-  install -m 0755 "${bundle_dir}/deploy/install.sh" "${PREFIX}/theta-install"
 
   echo "Installed theta binaries to ${PREFIX}:"
   echo "  ${PREFIX}/theta"
   echo "  ${PREFIX}/theta-daemon"
   echo "  ${PREFIX}/theta-mcp"
-  echo "  ${PREFIX}/theta-install"
 
   install -d "${SHARE_DIR}"
   if [[ "${INSTALL_SKILLS}" != "0" ]] && [[ -d "${bundle_dir}/skills" ]]; then

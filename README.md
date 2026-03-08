@@ -60,7 +60,6 @@ This installs:
 - `/usr/local/bin/theta`
 - `/usr/local/bin/theta-daemon`
 - `/usr/local/bin/theta-mcp`
-- `/usr/local/bin/theta-install`
 - `/usr/local/share/theta/skills`
 - `/etc/systemd/system/theta-daemon@.service`
 - `/etc/systemd/system/capture-signals@.service`
@@ -75,10 +74,10 @@ sudo systemctl enable --now capture-signals@$(whoami)
 sudo systemctl enable --now account-monitor@$(whoami)
 ```
 
-Update later with:
+Update later with the same one-liner:
 
 ```bash
-sudo theta-install
+curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
 ```
 
 The old source checkout at `~/theta` or `/root/theta` is not required.
@@ -187,7 +186,7 @@ sudo journalctl -u account-monitor@$(whoami) -f
 Update to the latest release:
 
 ```bash
-sudo theta-install
+curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
 ```
 
 Optional overrides:
