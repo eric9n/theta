@@ -214,7 +214,7 @@ done
 
 if [[ -n "${INTERNAL_BUNDLE_DIR}" ]]; then
   install_bundle "${INTERNAL_BUNDLE_DIR}" "${RESOLVED_VERSION}"
-elif [[ -n "${ROOT_DIR}" && -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" && -x "${ROOT_DIR}/bin/theta-mcp" ]]; then
+elif [[ -n "${ROOT_DIR}" && -f "${ROOT_DIR}/deploy/install.sh" && -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" && -x "${ROOT_DIR}/bin/theta-mcp" ]]; then
   install_bundle "${ROOT_DIR}" "${VERSION}"
 else
   download_and_install_release
