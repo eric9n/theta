@@ -70,6 +70,19 @@ fn theta_ops_account_monitor_help_works() {
 }
 
 #[test]
+fn theta_ops_health_check_help_works() {
+    let mut cmd = theta_cmd();
+    cmd.args(["ops", "health-check", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--symbol")
+                .and(predicate::str::contains("--max-otm-percent"))
+                .and(predicate::str::contains("--min-contracts")),
+        );
+}
+
+#[test]
 fn theta_snapshot_sell_opportunities_help_lists_return_basis_flags() {
     let mut cmd = theta_cmd();
     cmd.args(["snapshot", "sell-opportunities", "--help"])

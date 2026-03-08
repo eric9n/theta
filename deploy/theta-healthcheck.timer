@@ -1,0 +1,10 @@
+[Unit]
+Description=Run theta live health check daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=theta-healthcheck@%i.service
+
+[Install]
+WantedBy=timers.target

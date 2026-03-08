@@ -49,6 +49,7 @@ jobs:
           printf '%s\n' 'dev' > dist/VERSION
           cp README.md dist/
           cp deploy/*.service dist/deploy/
+          cp deploy/*.timer dist/deploy/
           cp deploy/*.sh dist/deploy/
           cp scripts/theta.sh dist/scripts/
           cp -R skills dist/

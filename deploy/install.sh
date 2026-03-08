@@ -148,6 +148,8 @@ install_bundle() {
     install -m 0644 "${bundle_dir}/deploy/theta-daemon.service" "${SYSTEMD_DIR}/theta-daemon@.service"
     install -m 0644 "${bundle_dir}/deploy/capture-signals.service" "${SYSTEMD_DIR}/capture-signals@.service"
     install -m 0644 "${bundle_dir}/deploy/account-monitor.service" "${SYSTEMD_DIR}/account-monitor@.service"
+    install -m 0644 "${bundle_dir}/deploy/theta-healthcheck.service" "${SYSTEMD_DIR}/theta-healthcheck@.service"
+    install -m 0644 "${bundle_dir}/deploy/theta-healthcheck.timer" "${SYSTEMD_DIR}/theta-healthcheck@.timer"
     if command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload
     fi

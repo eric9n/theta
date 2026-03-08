@@ -16,6 +16,7 @@ Personal CLI toolkit for option market snapshots, structure signals, and portfol
 - `theta signals relative-extreme`: compare one symbol's current extremes against a benchmark
 - `theta structure term-structure`: multi-expiry ATM IV term structure signal
 - `theta portfolio`: trade journal and position view
+- `theta ops health-check`: lightweight live self-check for daemon and option data
 
 ## Local Setup
 
@@ -64,6 +65,8 @@ This installs:
 - `/etc/systemd/system/theta-daemon@.service`
 - `/etc/systemd/system/capture-signals@.service`
 - `/etc/systemd/system/account-monitor@.service`
+- `/etc/systemd/system/theta-healthcheck@.service`
+- `/etc/systemd/system/theta-healthcheck@.timer`
 - bash/zsh/fish shell completions
 
 Then configure credentials and enable services:
@@ -73,6 +76,12 @@ mkdir -p ~/.config/theta
 sudo systemctl enable --now theta-daemon@$(whoami)
 sudo systemctl enable --now capture-signals@$(whoami)
 sudo systemctl enable --now account-monitor@$(whoami)
+```
+
+Run a manual live self-check any time:
+
+```bash
+/usr/local/bin/theta ops health-check
 ```
 
 Update later with the same one-liner:
@@ -153,6 +162,8 @@ For VPS deployment, the installer puts these unit templates in `/etc/systemd/sys
 - `deploy/theta-daemon.service`: runs the LongPort-backed local socket daemon.
 - `deploy/capture-signals.service`: runs `theta signals capture` every 5 minutes during US regular market hours.
 - `deploy/account-monitor.service`: runs `theta ops account-monitor` every 5 minutes during US regular market hours.
+- `deploy/theta-healthcheck.service`: runs a lightweight live health check against daemon, underlying quote, expiries, and a sampled option chain.
+- `deploy/theta-healthcheck.timer`: optionally runs the live health check once per day.
 
 `capture-signals` and `account-monitor` depend on `theta-daemon`, and each unit waits for the daemon socket before starting work.
 
@@ -182,6 +193,13 @@ Check logs:
 sudo journalctl -u theta-daemon@$(whoami) -f
 sudo journalctl -u capture-signals@$(whoami) -f
 sudo journalctl -u account-monitor@$(whoami) -f
+sudo journalctl -u theta-healthcheck@$(whoami) -f
+```
+
+Enable the optional daily self-check timer:
+
+```bash
+sudo systemctl enable --now theta-healthcheck@$(whoami).timer
 ```
 
 Update to the latest release:

@@ -94,6 +94,7 @@ struct OpsCommand {
 #[derive(Subcommand, Debug)]
 enum OpsSubcommand {
     AccountMonitor(ops::account_monitor::Cli),
+    HealthCheck(ops::health_check::Cli),
 }
 
 #[tokio::main]
@@ -120,6 +121,7 @@ async fn main() -> Result<()> {
         },
         Command::Ops(ops) => match ops.command {
             OpsSubcommand::AccountMonitor(cli) => ops::account_monitor::run(cli).await,
+            OpsSubcommand::HealthCheck(cli) => ops::health_check::run(cli).await,
         },
         Command::Completion(completion) => {
             emit_completion(completion.shell);
