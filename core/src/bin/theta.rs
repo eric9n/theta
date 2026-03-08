@@ -47,9 +47,7 @@ fn emit_completion(shell: CompletionShell) {
         CompletionShell::Bash => generate(Bash, &mut cmd, "theta", &mut io::stdout()),
         CompletionShell::Elvish => generate(Elvish, &mut cmd, "theta", &mut io::stdout()),
         CompletionShell::Fish => generate(Fish, &mut cmd, "theta", &mut io::stdout()),
-        CompletionShell::Powershell => {
-            generate(PowerShell, &mut cmd, "theta", &mut io::stdout())
-        }
+        CompletionShell::Powershell => generate(PowerShell, &mut cmd, "theta", &mut io::stdout()),
         CompletionShell::Zsh => generate(Zsh, &mut cmd, "theta", &mut io::stdout()),
     }
 }
