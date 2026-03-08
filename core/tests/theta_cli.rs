@@ -14,8 +14,22 @@ fn theta_help_lists_top_level_commands() {
             .and(predicate::str::contains("portfolio"))
             .and(predicate::str::contains("signals"))
             .and(predicate::str::contains("structure"))
-            .and(predicate::str::contains("ops")),
+            .and(predicate::str::contains("ops"))
+            .and(predicate::str::contains("completion")),
     );
+}
+
+#[test]
+fn theta_completion_bash_outputs_completion_script() {
+    let mut cmd = theta_cmd();
+    cmd.args(["completion", "--shell", "bash"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("_theta()")
+                .and(predicate::str::contains("complete -F"))
+                .and(predicate::str::contains("completion")),
+        );
 }
 
 #[test]

@@ -16,6 +16,10 @@ SHARE_DIR="${SHARE_DIR:-/usr/local/share/theta}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-1}"
 INSTALL_SKILLS="${INSTALL_SKILLS:-1}"
+INSTALL_COMPLETIONS="${INSTALL_COMPLETIONS:-1}"
+BASH_COMPLETION_DIR="${BASH_COMPLETION_DIR:-/usr/share/bash-completion/completions}"
+ZSH_COMPLETION_DIR="${ZSH_COMPLETION_DIR:-/usr/share/zsh/vendor-completions}"
+FISH_COMPLETION_DIR="${FISH_COMPLETION_DIR:-/usr/share/fish/vendor_completions.d}"
 REMOVE_LEGACY_ROOT="${REMOVE_LEGACY_ROOT:-0}"
 FORCE_INSTALL="${THETA_FORCE_INSTALL:-0}"
 INTERNAL_BUNDLE_DIR=""
@@ -41,6 +45,13 @@ Environment:
   SYSTEMD_DIR        systemd unit dir (default: /etc/systemd/system)
   INSTALL_SYSTEMD    Install systemd templates when 1 (default: 1)
   INSTALL_SKILLS     Install skills when 1 (default: 1)
+  INSTALL_COMPLETIONS
+                     Install shell completions when 1 (default: 1)
+  BASH_COMPLETION_DIR
+                     bash completion dir (default: /usr/share/bash-completion/completions)
+  ZSH_COMPLETION_DIR zsh completion dir (default: /usr/share/zsh/vendor-completions)
+  FISH_COMPLETION_DIR
+                     fish completion dir (default: /usr/share/fish/vendor_completions.d)
   THETA_FORCE_INSTALL
                      Reinstall even if target version is already present when set to 1
   REMOVE_LEGACY_ROOT Remove /root/theta after a successful install when set to 1
@@ -103,6 +114,22 @@ install_bundle() {
   echo "  ${PREFIX}/theta"
   echo "  ${PREFIX}/theta-daemon"
   echo "  ${PREFIX}/theta-mcp"
+
+  if [[ "${INSTALL_COMPLETIONS}" != "0" ]]; then
+    install -d "${BASH_COMPLETION_DIR}"
+    "${PREFIX}/theta" completion --shell bash > "${BASH_COMPLETION_DIR}/theta"
+
+    install -d "${ZSH_COMPLETION_DIR}"
+    "${PREFIX}/theta" completion --shell zsh > "${ZSH_COMPLETION_DIR}/_theta"
+
+    install -d "${FISH_COMPLETION_DIR}"
+    "${PREFIX}/theta" completion --shell fish > "${FISH_COMPLETION_DIR}/theta.fish"
+
+    echo "Installed theta shell completions:"
+    echo "  ${BASH_COMPLETION_DIR}/theta"
+    echo "  ${ZSH_COMPLETION_DIR}/_theta"
+    echo "  ${FISH_COMPLETION_DIR}/theta.fish"
+  fi
 
   install -d "${SHARE_DIR}"
   if [[ "${INSTALL_SKILLS}" != "0" ]] && [[ -d "${bundle_dir}/skills" ]]; then

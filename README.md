@@ -64,6 +64,7 @@ This installs:
 - `/etc/systemd/system/theta-daemon@.service`
 - `/etc/systemd/system/capture-signals@.service`
 - `/etc/systemd/system/account-monitor@.service`
+- bash/zsh/fish shell completions
 
 Then configure credentials and enable services:
 

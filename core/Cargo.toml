@@ -16,6 +16,7 @@ path = "src/bin/mcp_server.rs"
 anyhow = "1.0"
 async-trait = "0.1.89"
 clap = { version = "4.5.60", features = ["derive"] }
+clap_complete = "4.5.52"
 dotenvy = "0.15"
 rust-mcp-sdk = { version = "0.8.3", features = ["server", "stdio", "macros"] }
 schemars = "0.8"

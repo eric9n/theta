@@ -1,5 +1,10 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{
+    generate,
+    shells::{Bash, Elvish, Fish, PowerShell, Zsh},
+};
+use std::io;
 use theta::cli::{ops, portfolio, signals, snapshot, structure};
 
 #[derive(Parser, Debug)]
@@ -17,6 +22,36 @@ enum Command {
     Signals(SignalsCommand),
     Structure(StructureCommand),
     Ops(OpsCommand),
+    Completion(CompletionCommand),
+}
+
+#[derive(clap::Args, Debug)]
+#[command(about = "Generate shell completion scripts")]
+struct CompletionCommand {
+    #[arg(long, value_enum)]
+    shell: CompletionShell,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    Powershell,
+    Zsh,
+}
+
+fn emit_completion(shell: CompletionShell) {
+    let mut cmd = ThetaCli::command();
+    match shell {
+        CompletionShell::Bash => generate(Bash, &mut cmd, "theta", &mut io::stdout()),
+        CompletionShell::Elvish => generate(Elvish, &mut cmd, "theta", &mut io::stdout()),
+        CompletionShell::Fish => generate(Fish, &mut cmd, "theta", &mut io::stdout()),
+        CompletionShell::Powershell => {
+            generate(PowerShell, &mut cmd, "theta", &mut io::stdout())
+        }
+        CompletionShell::Zsh => generate(Zsh, &mut cmd, "theta", &mut io::stdout()),
+    }
 }
 
 #[derive(clap::Args, Debug)]
@@ -88,5 +123,9 @@ async fn main() -> Result<()> {
         Command::Ops(ops) => match ops.command {
             OpsSubcommand::AccountMonitor(cli) => ops::account_monitor::run(cli).await,
         },
+        Command::Completion(completion) => {
+            emit_completion(completion.shell);
+            Ok(())
+        }
     }
 }
