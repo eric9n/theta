@@ -9,7 +9,7 @@ name = "theta"
 path = "src/bin/theta.rs"
 
 [[bin]]
-name = "mcp-server"
+name = "theta-mcp"
 path = "src/bin/mcp_server.rs"
 
 [dependencies]

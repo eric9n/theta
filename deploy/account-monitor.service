@@ -1,17 +1,21 @@
 [Unit]
 Description=theta account monitor
-After=network-online.target
+After=network-online.target theta-daemon@%i.service
 Wants=network-online.target
+Requires=theta-daemon@%i.service
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/theta
-Environment=HOME=/root
+User=%i
+WorkingDirectory=%h
+Environment=HOME=%h
 Environment=RUST_LOG=info
-ExecStart=/root/theta/target/release/theta ops account-monitor --loop --every-seconds 300 --market-hours-only true --account firstrade
+EnvironmentFile=-%h/.config/theta/config.env
+EnvironmentFile=-%h/.config/theta/capture-signals.env
+ExecStartPre=/bin/sh -c 'socket_path="${THETA_SOCKET_PATH:-$HOME/.theta/run/theta.sock}"; for _ in $(seq 1 30); do [ -S "$socket_path" ] && exit 0; sleep 1; done; echo "theta-daemon socket not ready: $socket_path" >&2; exit 1'
+ExecStart=/usr/local/bin/theta ops account-monitor --loop --every-seconds 300 --market-hours-only true --account firstrade
 Restart=always
 RestartSec=10
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

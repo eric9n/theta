@@ -17,7 +17,7 @@ Personal CLI toolkit for option market snapshots, structure signals, and portfol
 - `theta structure term-structure`: multi-expiry ATM IV term structure signal
 - `theta portfolio`: trade journal and position view
 
-## Setup
+## Local Setup
 
 Start the local market-data daemon before running live commands:
 
@@ -30,29 +30,68 @@ cargo build --release -p theta-daemon
 Set `THETA_SOCKET_PATH` to override the socket location for both `theta-daemon` and the `theta` CLI.
 LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 
+For MCP clients, use the `theta-mcp` binary.
+
 Optional config file:
 
 - default path: `~/.theta/config.json`
 - override path: `THETA_CONFIG=/path/to/config.json`
 
-## Integrations
+## Skills
 
-Tellar and OpenClaw assets live under `integrations/`.
+Shared agent skill sources live under `skills/` in the repo and install to `/usr/local/share/theta/skills`.
 
-They consume `theta`; they do not define the CLI contract.
+## VPS Install
 
-- Tellar: `integrations/tellar/`
-- OpenClaw: `integrations/openclaw/`
-- Notes: `integrations/README.md`
-
-OpenClaw-specific helpers such as ledger replay also live under `integrations/openclaw/`.
-
-Install helpers:
+Install the latest GitHub release directly, without cloning the repo:
 
 ```bash
-./integrations/tellar/install.sh
-./integrations/openclaw/install.sh
+curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
 ```
+
+If you also want to remove the old `/root/theta` source checkout after a successful install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo env REMOVE_LEGACY_ROOT=1 bash
+```
+
+This installs:
+
+- `/usr/local/bin/theta`
+- `/usr/local/bin/theta-daemon`
+- `/usr/local/bin/theta-mcp`
+- `/usr/local/bin/theta-install`
+- `/usr/local/share/theta/skills`
+- `/etc/systemd/system/theta-daemon@.service`
+- `/etc/systemd/system/capture-signals@.service`
+- `/etc/systemd/system/account-monitor@.service`
+
+Then configure credentials and enable services:
+
+```bash
+mkdir -p ~/.config/theta
+sudo systemctl enable --now theta-daemon@$(whoami)
+sudo systemctl enable --now capture-signals@$(whoami)
+sudo systemctl enable --now account-monitor@$(whoami)
+```
+
+Update later with:
+
+```bash
+sudo theta-install
+```
+
+The old source checkout at `~/theta` or `/root/theta` is not required.
+
+## MCP
+
+Run the MCP adapter over stdio with:
+
+```bash
+/usr/local/bin/theta-mcp
+```
+
+Old references to `mcp-server` are no longer valid.
 
 ## Snapshot
 
@@ -109,28 +148,24 @@ cargo run --bin theta -- signals capture \
 
 ## systemd Service
 
-For VPS deployment, use the bundled unit template:
+For VPS deployment, the installer puts these unit templates in `/etc/systemd/system`:
 
-- Template file: `deploy/capture-signals.service`
-- It runs `theta signals capture` in loop mode every 5 minutes, limited to US regular market hours.
+- `deploy/theta-daemon.service`: runs the LongPort-backed local socket daemon.
+- `deploy/capture-signals.service`: runs `theta signals capture` every 5 minutes during US regular market hours.
+- `deploy/account-monitor.service`: runs `theta ops account-monitor` every 5 minutes during US regular market hours.
 
-Recommended flow on the server:
-
-```bash
-git clone <your-private-repo> ~/theta
-cd ~/theta
-cargo build --release
-mkdir -p ~/.config/theta
-cp deploy/capture-signals.service /tmp/capture-signals.service
-sudo cp /tmp/capture-signals.service /etc/systemd/system/capture-signals@$(whoami).service
-sudo systemctl daemon-reload
-sudo systemctl enable --now capture-signals@$(whoami)
-```
+`capture-signals` and `account-monitor` depend on `theta-daemon`, and each unit waits for the daemon socket before starting work.
 
 Set LongPort API credentials for the daemon in:
 
 ```bash
 ~/.config/theta/capture-signals.env
+```
+
+Optional runtime overrides such as `THETA_SOCKET_PATH` can live in:
+
+```bash
+~/.config/theta/config.env
 ```
 
 Example:
@@ -144,26 +179,42 @@ LONGPORT_ACCESS_TOKEN=...
 Check logs:
 
 ```bash
+sudo journalctl -u theta-daemon@$(whoami) -f
 sudo journalctl -u capture-signals@$(whoami) -f
+sudo journalctl -u account-monitor@$(whoami) -f
 ```
 
-Update after new commits:
+Update to the latest release:
 
 ```bash
-chmod +x deploy/update.sh
-./deploy/update.sh
+sudo theta-install
 ```
 
 Optional overrides:
 
-- First argument: systemd service name
-- `THETA_BRANCH`: branch to deploy (default: `main`)
-- `THETA_PROJECT_DIR`: project path on the server (default: `~/theta`)
+- `THETA_REPO`: GitHub repo in `owner/name` form
+- `THETA_VERSION`: release tag or `latest` (default)
+- `PREFIX`: install prefix for binaries (default: `/usr/local/bin`)
+- `SHARE_DIR`: shared data dir for installed skills (default: `/usr/local/share/theta`)
+- `SYSTEMD_DIR`: systemd unit dir (default: `/etc/systemd/system`)
+- `REMOVE_LEGACY_ROOT=1`: remove `/root/theta` after successful install
 
-Example:
+## Release Bundle
+
+The GitHub release archive is structured so it can be unpacked directly on a VPS without cloning the source tree:
+
+- `bin/theta`
+- `bin/theta-daemon`
+- `bin/theta-mcp`
+- `deploy/`
+- `scripts/theta.sh`
+- `skills/`
+- `VERSION`
+
+Install from an unpacked release bundle with the same script:
 
 ```bash
-THETA_BRANCH=master THETA_PROJECT_DIR=$HOME/apps/theta ./deploy/update.sh capture-signals@$(whoami)
+sudo bash deploy/install.sh
 ```
 
 ## Signal History

@@ -5,7 +5,7 @@ Use this skill for the unified `theta` CLI.
 Primary entrypoint:
 
 ```bash
-/root/theta/target/release/theta --help
+/usr/local/bin/theta --help
 ```
 
 Routing:
@@ -18,11 +18,11 @@ Routing:
 
 General rules:
 
-- Always use `/root/theta/target/release/theta ...` on the VPS.
-- If the binary is missing, build it with:
+- Always use `/usr/local/bin/theta ...` on the VPS.
+- If the binary is missing, install or update it with:
 
 ```bash
-cd /root/theta && cargo build --release --bin theta
+curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
 ```
 
 - Market-data commands require the local `theta-daemon` to be running and reachable at `${HOME}/.theta/run/theta.sock` by default.
@@ -33,17 +33,17 @@ cd /root/theta && cargo build --release --bin theta
 Useful commands:
 
 ```bash
-/root/theta/target/release/theta snapshot stock-quote --symbol TSLA.US
-/root/theta/target/release/theta snapshot analyze-chain --symbol TSLA.US --expiry 2026-03-20
-/root/theta/target/release/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20
-/root/theta/target/release/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --return-basis premium-yield
-/root/theta/target/release/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --group-by-return-basis
-/root/theta/target/release/theta portfolio positions
-/root/theta/target/release/theta portfolio report --offline
-/root/theta/target/release/theta portfolio account monitor-history --limit 20
-/root/theta/target/release/theta signals history --limit 20
-/root/theta/target/release/theta structure market-tone --symbol TSLA.US --expiry 2026-03-20
-/root/theta/target/release/theta ops account-monitor --once --account firstrade
+/usr/local/bin/theta snapshot stock-quote --symbol TSLA.US
+/usr/local/bin/theta snapshot analyze-chain --symbol TSLA.US --expiry 2026-03-20
+/usr/local/bin/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20
+/usr/local/bin/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --return-basis premium-yield
+/usr/local/bin/theta snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --group-by-return-basis
+/usr/local/bin/theta portfolio positions
+/usr/local/bin/theta portfolio report --offline
+/usr/local/bin/theta portfolio account monitor-history --limit 20
+/usr/local/bin/theta signals history --limit 20
+/usr/local/bin/theta structure market-tone --symbol TSLA.US --expiry 2026-03-20
+/usr/local/bin/theta ops account-monitor --once --account firstrade
 ```
 
 Sell-opportunities notes:

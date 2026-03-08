@@ -9,6 +9,7 @@ use rust_mcp_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use theta::ledger::{AccountSnapshot, Ledger, Position};
@@ -19,7 +20,7 @@ use theta::signal_service::{
     MarketToneRequest, PutCallBiasRequest, SkewSignalRequest, SmileSignalRequest,
     TermStructureRequest, ThetaSignalService,
 };
-use theta::snapshot_store::SignalSnapshotStore;
+use theta::snapshot_store::{MarketExtremeMetricStat, MarketExtremeRow, SignalSnapshotStore};
 
 #[derive(Clone)]
 struct ThetaServerState {
@@ -134,11 +135,10 @@ struct GetRelativeExtremeArgs {
     description = "Get real-time portfolio holdings, P&L, and aggregated Greeks risk"
 )]
 #[derive(Debug, Deserialize, Serialize, macros::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct GetPortfolioArgs {
     /// Associated brokerage account (default: "firstrade", alternative: "longbridge")
     account: Option<String>,
-    /// Initial margin ratio assumption (default 0.3)
-    margin_ratio: Option<f64>,
 }
 
 #[mcp_tool(
@@ -157,6 +157,9 @@ struct ThetaHandler {
     state: Arc<ThetaServerState>,
 }
 
+const MARKET_EXTREME_SAMPLE_LIMIT: usize = 252;
+const ABNORMAL_Z_SCORE_THRESHOLD: f64 = 2.0;
+
 impl ThetaHandler {
     fn parse_args<T: serde::de::DeserializeOwned>(
         &self,
@@ -164,6 +167,33 @@ impl ThetaHandler {
     ) -> Result<T, CallToolError> {
         serde_json::from_value(Value::Object(args.unwrap_or_default()))
             .map_err(|e| CallToolError::from_message(format!("Invalid arguments: {}", e)))
+    }
+
+    fn json_content<T: Serialize>(&self, value: &T) -> Result<CallToolResult, CallToolError> {
+        let text = serde_json::to_string_pretty(value)
+            .map_err(|e| CallToolError::from_message(format!("Failed to serialize result: {e}")))?;
+        Ok(CallToolResult::text_content(vec![text.into()]))
+    }
+
+    fn tool_error<E: std::fmt::Display>(&self, context: &str, err: E) -> CallToolError {
+        CallToolError::from_message(format!("{context}: {err}"))
+    }
+
+    async fn resolve_expiry(
+        &self,
+        symbol: &str,
+        expiry: Option<String>,
+    ) -> Result<time::Date, CallToolError> {
+        if let Some(raw) = expiry {
+            theta::market_data::parse_expiry_date(&raw)
+                .map_err(|e| self.tool_error("Error parsing expiry", e))
+        } else {
+            self.state
+                .service
+                .front_expiry_for_symbol(symbol)
+                .await
+                .map_err(|e| self.tool_error("Error fetching front expiry", e))
+        }
     }
 }
 
@@ -201,43 +231,19 @@ impl ServerHandler for ThetaHandler {
         match params.name.as_str() {
             "get_stock_quote" => {
                 let args: GetStockQuoteArgs = self.parse_args(params.arguments)?;
-
-                match s.service.stock_quote(&args.symbol).await {
-                    Ok(quote) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&quote)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let quote = s
+                    .service
+                    .stock_quote(&args.symbol)
+                    .await
+                    .map_err(|e| self.tool_error("Error fetching stock quote", e))?;
+                self.json_content(&quote)
             }
             "get_market_tone" => {
                 let args: GetMarketToneArgs = self.parse_args(params.arguments)?;
 
                 let symbol = args.symbol.clone();
                 let expiries_limit = args.expiries_limit.unwrap_or(4) as usize;
-
-                let expiry = if let Some(dt) = args.expiry {
-                    match theta::market_data::parse_expiry_date(&dt) {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error parsing expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                } else {
-                    match s.service.front_expiry_for_symbol(&symbol).await {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error fetching front expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                };
+                let expiry = self.resolve_expiry(&symbol, args.expiry).await?;
 
                 let tone_req = MarketToneRequest {
                     symbol: symbol.clone(),
@@ -252,17 +258,12 @@ impl ServerHandler for ThetaHandler {
                     smile_target_otm_percents: vec![0.05, 0.10, 0.15],
                     bias_min_otm_percent: 0.05,
                 };
-
-                match s.service.market_tone(tone_req).await {
-                    Ok(view) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&view)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let view = s
+                    .service
+                    .market_tone(tone_req)
+                    .await
+                    .map_err(|e| self.tool_error("Error computing market tone", e))?;
+                self.json_content(&view)
             }
             "get_signal_history" => {
                 let args: GetSignalHistoryArgs = self.parse_args(params.arguments)?;
@@ -270,40 +271,16 @@ impl ServerHandler for ThetaHandler {
                 let limit = args.limit.unwrap_or(20) as usize;
                 let store = SignalSnapshotStore::open(&s.db_path)
                     .map_err(|e| CallToolError::from_message(e.to_string()))?;
-                match store.list_market_tone_snapshots(args.symbol.as_deref(), limit) {
-                    Ok(snapshots) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&snapshots)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let snapshots = store
+                    .list_market_tone_snapshots(args.symbol.as_deref(), limit)
+                    .map_err(|e| self.tool_error("Error loading signal history", e))?;
+                self.json_content(&snapshots)
             }
             "get_skew" => {
                 let args: GetSkewArgs = self.parse_args(params.arguments)?;
 
                 let symbol = args.symbol.clone();
-                let expiry_date = if let Some(dt) = args.expiry {
-                    match theta::market_data::parse_expiry_date(&dt) {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error parsing expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                } else {
-                    match s.service.front_expiry_for_symbol(&symbol).await {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error fetching front expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                };
+                let expiry_date = self.resolve_expiry(&symbol, args.expiry).await?;
 
                 let skew_req = SkewSignalRequest {
                     symbol,
@@ -315,41 +292,18 @@ impl ServerHandler for ThetaHandler {
                     target_delta: args.target_delta.unwrap_or(0.25),
                     target_otm_percent: args.target_otm_percent.unwrap_or(0.05),
                 };
-
-                match s.service.skew(skew_req).await {
-                    Ok(skew) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&skew)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let skew = s
+                    .service
+                    .skew(skew_req)
+                    .await
+                    .map_err(|e| self.tool_error("Error computing skew", e))?;
+                self.json_content(&skew)
             }
             "get_smile" => {
                 let args: GetSmileArgs = self.parse_args(params.arguments)?;
 
                 let symbol = args.symbol.clone();
-                let expiry_date = if let Some(dt) = args.expiry {
-                    match theta::market_data::parse_expiry_date(&dt) {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error parsing expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                } else {
-                    match s.service.front_expiry_for_symbol(&symbol).await {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error fetching front expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                };
+                let expiry_date = self.resolve_expiry(&symbol, args.expiry).await?;
 
                 let smile_req = SmileSignalRequest {
                     symbol,
@@ -360,17 +314,12 @@ impl ServerHandler for ThetaHandler {
                     iv_from_market_price: true,
                     target_otm_percents: vec![0.02, 0.05, 0.10, 0.15, 0.20],
                 };
-
-                match s.service.smile(smile_req).await {
-                    Ok(smile) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&smile)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let smile = s
+                    .service
+                    .smile(smile_req)
+                    .await
+                    .map_err(|e| self.tool_error("Error computing smile", e))?;
+                self.json_content(&smile)
             }
             "get_term_structure" => {
                 let args: GetTermStructureArgs = self.parse_args(params.arguments)?;
@@ -383,39 +332,18 @@ impl ServerHandler for ThetaHandler {
                     iv: None,
                     iv_from_market_price: true,
                 };
-
-                match s.service.term_structure(ts_req).await {
-                    Ok(ts) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&ts).unwrap_or_default().into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let ts = s
+                    .service
+                    .term_structure(ts_req)
+                    .await
+                    .map_err(|e| self.tool_error("Error computing term structure", e))?;
+                self.json_content(&ts)
             }
             "get_put_call_bias" => {
                 let args: GetPutCallBiasArgs = self.parse_args(params.arguments)?;
 
                 let symbol = args.symbol.clone();
-                let expiry_date = if let Some(dt) = args.expiry {
-                    match theta::market_data::parse_expiry_date(&dt) {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error parsing expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                } else {
-                    match s.service.front_expiry_for_symbol(&symbol).await {
-                        Ok(exp) => exp,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error fetching front expiry: {}", e).into(),
-                            ]));
-                        }
-                    }
-                };
+                let expiry_date = self.resolve_expiry(&symbol, args.expiry).await?;
 
                 let bias_req = PutCallBiasRequest {
                     symbol,
@@ -426,67 +354,30 @@ impl ServerHandler for ThetaHandler {
                     iv_from_market_price: true,
                     min_otm_percent: args.bias_min_otm_percent.unwrap_or(0.05),
                 };
-
-                match s.service.put_call_bias(bias_req).await {
-                    Ok(bias) => Ok(CallToolResult::text_content(vec![
-                        serde_json::to_string_pretty(&bias)
-                            .unwrap_or_default()
-                            .into(),
-                    ])),
-                    Err(e) => Ok(CallToolResult::text_content(vec![
-                        format!("Error: {}", e).into(),
-                    ])),
-                }
+                let bias = s
+                    .service
+                    .put_call_bias(bias_req)
+                    .await
+                    .map_err(|e| self.tool_error("Error computing put/call bias", e))?;
+                self.json_content(&bias)
             }
             "get_market_extreme" => {
                 let args: GetMarketExtremeArgs = self.parse_args(params.arguments)?;
-
                 let limit = args.limit.unwrap_or(20) as usize;
                 let store = SignalSnapshotStore::open(&s.db_path)
                     .map_err(|e| CallToolError::from_message(e.to_string()))?;
-
-                let symbols = store
-                    .list_symbols()
-                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
-                let mut results = Vec::new();
-                for symbol in symbols {
-                    if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
-                        results.push(row);
-                    }
-                }
-
-                Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&results)
-                        .unwrap_or_default()
-                        .into(),
-                ]))
+                let results = screen_market_extremes(&store, MARKET_EXTREME_SAMPLE_LIMIT, limit)
+                    .map_err(|e| self.tool_error("Error screening market extremes", e))?;
+                self.json_content(&results)
             }
             "get_relative_extreme" => {
                 let args: GetRelativeExtremeArgs = self.parse_args(params.arguments)?;
-
                 let limit = args.limit.unwrap_or(20) as usize;
                 let store = SignalSnapshotStore::open(&s.db_path)
                     .map_err(|e| CallToolError::from_message(e.to_string()))?;
-
-                let symbols = store
-                    .list_symbols()
-                    .map_err(|e| CallToolError::from_message(e.to_string()))?;
-                let mut results = Vec::new();
-                for symbol in symbols {
-                    if let Ok(Some(row)) = store.compute_market_extreme(&symbol, limit) {
-                        if let Some(z) = row.front_atm_iv.z_score {
-                            if z.abs() >= 2.0 {
-                                results.push(row);
-                            }
-                        }
-                    }
-                }
-
-                Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&results)
-                        .unwrap_or_default()
-                        .into(),
-                ]))
+                let results = screen_relative_extremes(&store, MARKET_EXTREME_SAMPLE_LIMIT, limit)
+                    .map_err(|e| self.tool_error("Error screening relative extremes", e))?;
+                self.json_content(&results)
             }
             "get_portfolio" => {
                 let args: GetPortfolioArgs = self.parse_args(params.arguments)?;
@@ -512,30 +403,11 @@ impl ServerHandler for ThetaHandler {
                 let positions: Vec<Position> = match ledger.calculate_positions(&account_name, None)
                 {
                     Ok(p) => p,
-                    Err(e) => {
-                        return Ok(CallToolResult::text_content(vec![
-                            format!("Error loading positions: {}", e).into(),
-                        ]));
-                    }
+                    Err(e) => return Err(self.tool_error("Error loading positions", e)),
                 };
 
-                let account_snapshot = match ledger.latest_account_snapshot(&account_name) {
-                    Ok(Some(a)) => a,
-                    _ => AccountSnapshot {
-                        id: 0,
-                        snapshot_at: "".to_string(),
-                        baseline_trade_id: None,
-                        trade_date_cash: 100000.0,
-                        settled_cash: 100000.0,
-                        option_buying_power: None,
-                        stock_buying_power: None,
-                        margin_loan: None,
-                        short_market_value: None,
-                        margin_enabled: true,
-                        notes: "dummy snapshot".to_string(),
-                        account_id: account_name,
-                    },
-                };
+                let account_snapshot = latest_account_snapshot_required(&ledger, &account_name)
+                    .map_err(CallToolError::from_message)?;
 
                 let account = AccountContext {
                     trade_date_cash: Some(account_snapshot.trade_date_cash),
@@ -552,11 +424,7 @@ impl ServerHandler for ThetaHandler {
                 let enriched =
                     match portfolio_service::enrich_positions(analysis_service, &positions).await {
                         Ok(e) => e,
-                        Err(e) => {
-                            return Ok(CallToolResult::text_content(vec![
-                                format!("Error enriching positions: {}", e).into(),
-                            ]));
-                        }
+                        Err(e) => return Err(self.tool_error("Error enriching positions", e)),
                     };
 
                 let strategies = risk_engine::identify_strategies(&positions);
@@ -579,12 +447,7 @@ impl ServerHandler for ThetaHandler {
                     "strategies": evaluated_strategies,
                     "enriched_positions": enriched,
                 });
-
-                Ok(CallToolResult::text_content(vec![
-                    serde_json::to_string_pretty(&report)
-                        .unwrap_or_default()
-                        .into(),
-                ]))
+                self.json_content(&report)
             }
             _ => Err(CallToolError::unknown_tool(params.name)),
         }
@@ -598,6 +461,112 @@ fn default_db_path() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home)
         .join(".theta")
         .join("signals.db"))
+}
+
+fn latest_account_snapshot_required(
+    ledger: &Ledger,
+    account_id: &str,
+) -> std::result::Result<AccountSnapshot, String> {
+    match ledger.latest_account_snapshot(account_id) {
+        Ok(Some(snapshot)) => Ok(snapshot),
+        Ok(None) => Err(format!(
+            "Error loading account snapshot: no account snapshot found for account {}",
+            account_id
+        )),
+        Err(e) => Err(format!("Error loading account snapshot: {}", e)),
+    }
+}
+
+fn screen_market_extremes(
+    store: &SignalSnapshotStore,
+    sample_limit: usize,
+    result_limit: usize,
+) -> anyhow::Result<Vec<MarketExtremeRow>> {
+    let today = time::OffsetDateTime::now_utc().date();
+    screen_market_extremes_for_date(store, sample_limit, result_limit, today)
+}
+
+fn screen_market_extremes_for_date(
+    store: &SignalSnapshotStore,
+    sample_limit: usize,
+    result_limit: usize,
+    today: time::Date,
+) -> anyhow::Result<Vec<MarketExtremeRow>> {
+    let mut rows = load_market_extreme_rows(store, sample_limit)?;
+    rows.retain(|row| market_extreme_row_is_from_date(row, today));
+    rows.sort_by(compare_market_extreme_rows);
+    rows.truncate(result_limit);
+    Ok(rows)
+}
+
+fn screen_relative_extremes(
+    store: &SignalSnapshotStore,
+    sample_limit: usize,
+    result_limit: usize,
+) -> anyhow::Result<Vec<MarketExtremeRow>> {
+    let mut rows = load_market_extreme_rows(store, sample_limit)?;
+    rows.retain(market_extreme_is_abnormal);
+    rows.sort_by(compare_market_extreme_rows);
+    rows.truncate(result_limit);
+    Ok(rows)
+}
+
+fn load_market_extreme_rows(
+    store: &SignalSnapshotStore,
+    sample_limit: usize,
+) -> anyhow::Result<Vec<MarketExtremeRow>> {
+    let symbols = store.list_symbols()?;
+    let mut rows = Vec::new();
+    for symbol in symbols {
+        if let Some(row) = store.compute_market_extreme(&symbol, sample_limit)? {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+fn compare_market_extreme_rows(left: &MarketExtremeRow, right: &MarketExtremeRow) -> Ordering {
+    market_extreme_score(right)
+        .partial_cmp(&market_extreme_score(left))
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| right.sample_count.cmp(&left.sample_count))
+        .then_with(|| left.symbol.cmp(&right.symbol))
+}
+
+fn market_extreme_row_is_from_date(row: &MarketExtremeRow, date: time::Date) -> bool {
+    row.current_captured_at
+        .get(..10)
+        .is_some_and(|prefix| prefix == date.to_string())
+}
+
+fn market_extreme_score(row: &MarketExtremeRow) -> f64 {
+    market_extreme_z_scores(row)
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .fold(0.0, f64::max)
+}
+
+fn market_extreme_is_abnormal(row: &MarketExtremeRow) -> bool {
+    market_extreme_z_scores(row)
+        .into_iter()
+        .flatten()
+        .any(|z| z.abs() >= ABNORMAL_Z_SCORE_THRESHOLD)
+}
+
+fn market_extreme_z_scores(row: &MarketExtremeRow) -> [Option<f64>; 6] {
+    [
+        metric_z_score(row.delta_skew.as_ref()),
+        metric_z_score(row.otm_skew.as_ref()),
+        row.front_atm_iv.z_score,
+        metric_z_score(row.term_structure_change_from_front.as_ref()),
+        metric_z_score(row.open_interest_bias_ratio.as_ref()),
+        metric_z_score(row.otm_open_interest_bias_ratio.as_ref()),
+    ]
+}
+
+fn metric_z_score(metric: Option<&MarketExtremeMetricStat>) -> Option<f64> {
+    metric.and_then(|metric| metric.z_score)
 }
 
 #[tokio::main]
@@ -698,4 +667,265 @@ async fn main() -> SdkResult<()> {
 
     tracing::info!("Running MCP server on stdio...");
     server.start().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GetPortfolioArgs, latest_account_snapshot_required, market_extreme_is_abnormal,
+        market_extreme_row_is_from_date, market_extreme_score, screen_market_extremes,
+        screen_market_extremes_for_date, screen_relative_extremes,
+    };
+    use theta::domain::{
+        MarketToneSummary, MarketToneView, PutCallBiasView, PutCallSideTotals, SkewSignalView,
+        SmileSignalView, TermStructureView,
+    };
+    use theta::ledger::Ledger;
+    use theta::snapshot_store::{MarketExtremeMetricStat, MarketExtremeRow, SignalSnapshotStore};
+
+    #[test]
+    fn latest_account_snapshot_required_errors_when_snapshot_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("portfolio.db");
+        let ledger = Ledger::open(&db_path).expect("ledger opens");
+
+        let err = latest_account_snapshot_required(&ledger, "firstrade").expect_err("no snapshot");
+        assert!(err.contains("no account snapshot found for account firstrade"));
+    }
+
+    #[test]
+    fn latest_account_snapshot_required_returns_existing_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("portfolio.db");
+        let ledger = Ledger::open(&db_path).expect("ledger opens");
+        ledger
+            .record_account_snapshot(
+                "2026-03-08T09:30:00Z",
+                10_000.0,
+                9_500.0,
+                Some(8_000.0),
+                Some(12_000.0),
+                Some(500.0),
+                None,
+                true,
+                "seed snapshot",
+                "firstrade",
+            )
+            .expect("snapshot records");
+
+        let snapshot =
+            latest_account_snapshot_required(&ledger, "firstrade").expect("snapshot exists");
+        assert_eq!(snapshot.account_id, "firstrade");
+        assert_eq!(snapshot.settled_cash, 9_500.0);
+    }
+
+    #[test]
+    fn get_portfolio_args_reject_unknown_margin_ratio() {
+        let err = serde_json::from_value::<GetPortfolioArgs>(serde_json::json!({
+            "account": "firstrade",
+            "margin_ratio": 0.3
+        }))
+        .expect_err("margin_ratio should be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn market_extreme_helpers_rank_and_filter_by_max_abs_z_score() {
+        let strong = sample_market_extreme_row("TSLA.US", Some(2.8), Some(0.7));
+        let mild = sample_market_extreme_row("QQQ.US", Some(1.6), Some(1.1));
+        let flat = sample_market_extreme_row("SPY.US", None, None);
+
+        assert!(market_extreme_score(&strong) > market_extreme_score(&mild));
+        assert!(market_extreme_is_abnormal(&strong));
+        assert!(!market_extreme_is_abnormal(&mild));
+        assert_eq!(market_extreme_score(&flat), 0.0);
+    }
+
+    #[test]
+    fn screening_helpers_sort_by_severity_and_respect_result_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("signals.db");
+        let store = SignalSnapshotStore::open(&db_path).expect("store opens");
+        seed_market_extreme_samples(&store, "QQQ.US", 1.2, 1.1, 3);
+        seed_market_extreme_samples(&store, "TSLA.US", 2.9, 0.4, 3);
+        seed_market_extreme_samples(&store, "SPY.US", 2.1, 0.3, 3);
+
+        let market = screen_market_extremes(&store, 252, 2).expect("market extremes");
+        let relative = screen_relative_extremes(&store, 252, 10).expect("relative extremes");
+
+        assert_eq!(market.len(), 2);
+        assert!(market[0].sample_count >= market[1].sample_count);
+        assert!(market_extreme_score(&market[0]) >= market_extreme_score(&market[1]));
+        assert!(relative.iter().all(market_extreme_is_abnormal));
+        assert!(
+            relative
+                .windows(2)
+                .all(|pair| { market_extreme_score(&pair[0]) >= market_extreme_score(&pair[1]) })
+        );
+    }
+
+    #[test]
+    fn market_extreme_screening_only_returns_rows_from_requested_day() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("signals.db");
+        let store = SignalSnapshotStore::open(&db_path).expect("store opens");
+        let today =
+            time::Date::from_calendar_date(2026, time::Month::March, 8).expect("valid date");
+        seed_market_extreme_samples(&store, "TSLA.US", 2.9, 0.4, 3);
+        seed_market_extreme_samples(&store, "QQQ.US", 1.2, 1.1, 1);
+
+        let rows = screen_market_extremes_for_date(&store, 252, 10, today)
+            .expect("market extremes for date");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "TSLA.US");
+        assert!(market_extreme_row_is_from_date(&rows[0], today));
+    }
+
+    fn sample_market_extreme_row(
+        symbol: &str,
+        front_iv_z: Option<f64>,
+        delta_skew_z: Option<f64>,
+    ) -> MarketExtremeRow {
+        MarketExtremeRow {
+            symbol: symbol.to_string(),
+            sample_count: 252,
+            current_captured_at: "2026-03-08T09:30:00Z".to_string(),
+            current_front_expiry: "2026-03-20".to_string(),
+            delta_skew: delta_skew_z.map(|z| sample_metric_stat(0.0, z)),
+            otm_skew: None,
+            front_atm_iv: MarketExtremeMetricStat {
+                current: 0.0,
+                mean: 0.0,
+                std_dev: 1.0,
+                z_score: front_iv_z,
+                sample_count: 252,
+            },
+            term_structure_change_from_front: None,
+            open_interest_bias_ratio: None,
+            otm_open_interest_bias_ratio: None,
+        }
+    }
+
+    fn sample_metric_stat(current: f64, z_score: f64) -> MarketExtremeMetricStat {
+        MarketExtremeMetricStat {
+            current,
+            mean: 0.0,
+            std_dev: 1.0,
+            z_score: Some(z_score),
+            sample_count: 252,
+        }
+    }
+
+    fn seed_market_extreme_samples(
+        store: &SignalSnapshotStore,
+        symbol: &str,
+        current_front_atm_iv: f64,
+        baseline_front_atm_iv: f64,
+        start_day: u8,
+    ) {
+        for idx in 0..6 {
+            let captured_at = format!("2026-03-{:02}T09:30:00Z", usize::from(start_day) + idx);
+            let front_atm_iv = if idx == 5 {
+                current_front_atm_iv
+            } else {
+                baseline_front_atm_iv
+            };
+            let view = MarketToneView {
+                underlying_symbol: symbol.to_string(),
+                front_expiry: "2026-03-20".to_string(),
+                summary: MarketToneSummary {
+                    delta_skew: Some(front_atm_iv / 10.0),
+                    otm_skew: None,
+                    front_atm_iv,
+                    farthest_atm_iv: None,
+                    term_structure_change_from_front: None,
+                    put_wing_slope: None,
+                    call_wing_slope: None,
+                    open_interest_bias_ratio: None,
+                    otm_open_interest_bias_ratio: None,
+                    average_iv_bias: None,
+                    otm_average_iv_bias: None,
+                    downside_protection: "balanced".to_string(),
+                    term_structure_shape: "flat".to_string(),
+                    wing_shape: "balanced".to_string(),
+                    positioning_bias: "balanced".to_string(),
+                    overall_tone: "neutral".to_string(),
+                    summary_sentence: "seed".to_string(),
+                },
+                skew: SkewSignalView {
+                    underlying_symbol: symbol.to_string(),
+                    underlying_price: "0".to_string(),
+                    expiry: "2026-03-20".to_string(),
+                    days_to_expiry: 12,
+                    rate: 0.0,
+                    rate_source: "seed".to_string(),
+                    target_delta: 0.25,
+                    target_otm_percent: 0.05,
+                    atm_strike_price: "0".to_string(),
+                    atm_iv: front_atm_iv,
+                    delta_put: None,
+                    delta_call: None,
+                    delta_skew: Some(front_atm_iv / 10.0),
+                    delta_put_wing_vs_atm: None,
+                    delta_call_wing_vs_atm: None,
+                    otm_put: None,
+                    otm_call: None,
+                    otm_skew: None,
+                    otm_put_wing_vs_atm: None,
+                    otm_call_wing_vs_atm: None,
+                },
+                smile: SmileSignalView {
+                    underlying_symbol: symbol.to_string(),
+                    underlying_price: "0".to_string(),
+                    expiry: "2026-03-20".to_string(),
+                    days_to_expiry: 12,
+                    rate: 0.0,
+                    rate_source: "seed".to_string(),
+                    atm_strike_price: "0".to_string(),
+                    atm_iv: front_atm_iv,
+                    put_points: vec![],
+                    call_points: vec![],
+                    put_wing_slope: None,
+                    call_wing_slope: None,
+                },
+                put_call_bias: PutCallBiasView {
+                    underlying_symbol: symbol.to_string(),
+                    underlying_price: "0".to_string(),
+                    expiry: "2026-03-20".to_string(),
+                    days_to_expiry: 12,
+                    rate: 0.0,
+                    rate_source: "seed".to_string(),
+                    min_otm_percent: 0.05,
+                    all_puts: empty_put_call_totals(),
+                    all_calls: empty_put_call_totals(),
+                    otm_puts: empty_put_call_totals(),
+                    otm_calls: empty_put_call_totals(),
+                    volume_bias_ratio: None,
+                    open_interest_bias_ratio: None,
+                    otm_volume_bias_ratio: None,
+                    otm_open_interest_bias_ratio: None,
+                    average_iv_bias: None,
+                    otm_average_iv_bias: None,
+                },
+                term_structure: TermStructureView {
+                    underlying_symbol: symbol.to_string(),
+                    target_expiries: 0,
+                    points: vec![],
+                },
+            };
+            store
+                .record_market_tone(&captured_at, &view)
+                .expect("seed record");
+        }
+    }
+
+    fn empty_put_call_totals() -> PutCallSideTotals {
+        PutCallSideTotals {
+            contracts: 0,
+            total_volume: 0,
+            total_open_interest: 0,
+            average_iv: None,
+        }
+    }
 }

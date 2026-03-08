@@ -2,9 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_THETA_ROOT="${HOME}/theta"
-THETA_ROOT="${THETA_ROOT:-${DEFAULT_THETA_ROOT}}"
-THETA_BIN_DIR="${THETA_BIN_DIR:-${THETA_ROOT}/target/release}"
+THETA_BIN_DIR="${THETA_BIN_DIR:-/usr/local/bin}"
 THETA_BIN="${THETA_BIN_DIR}/theta"
 
 if [[ ! -x "${THETA_BIN}" ]]; then
@@ -17,7 +15,8 @@ fi
 
 if [[ ! -x "${THETA_BIN}" ]]; then
   echo "Missing theta binary at ${THETA_BIN}." >&2
-  echo "Set THETA_BIN_DIR or THETA_ROOT, or build it in ~/theta:" >&2
+  echo "Install theta into /usr/local/bin or set THETA_BIN_DIR." >&2
+  echo "Fallback for local development:" >&2
   echo "  cargo build --release --bin theta" >&2
   exit 1
 fi
