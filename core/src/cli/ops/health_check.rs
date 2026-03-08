@@ -1,6 +1,6 @@
-use crate::analysis_service::ThetaAnalysisService;
-use crate::market_data::{OptionChainFetchFilter, parse_expiry_date};
-use anyhow::{Context, Result, anyhow, bail};
+use crate::market_data::OptionChainFetchFilter;
+use crate::signal_service::ThetaSignalService;
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::time::Instant;
 
@@ -33,8 +33,8 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 
     let started = Instant::now();
-    let service = ThetaAnalysisService::from_env().await?;
-    let market = service.market();
+    let service = ThetaSignalService::from_env().await?;
+    let market = service.analysis().market();
     let symbol = cli.symbol.trim().to_uppercase();
 
     if symbol.is_empty() {
@@ -52,15 +52,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    let expiries = market
-        .fetch_option_expiries(&symbol)
+    let front_expiry = service
+        .front_expiry_for_symbol(&symbol)
         .await
-        .with_context(|| format!("failed to fetch option expiries for {symbol}"))?;
-    let front_expiry = expiries
-        .first()
-        .ok_or_else(|| anyhow!("no option expiries returned for {symbol}"))?;
-    let front_expiry = parse_expiry_date(front_expiry)
-        .with_context(|| format!("failed to parse front expiry for {symbol}"))?;
+        .with_context(|| format!("failed to resolve front expiry for {symbol}"))?;
 
     let chain = market
         .fetch_option_chain_filtered(
