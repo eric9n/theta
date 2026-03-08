@@ -2,8 +2,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]-}"
+SCRIPT_DIR=""
+ROOT_DIR=""
+if [[ -n "${SCRIPT_PATH}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+  ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 REPO="${THETA_REPO:-eric9n/theta}"
 VERSION="${THETA_VERSION:-latest}"
 PREFIX="${PREFIX:-/usr/local/bin}"
@@ -209,7 +214,7 @@ done
 
 if [[ -n "${INTERNAL_BUNDLE_DIR}" ]]; then
   install_bundle "${INTERNAL_BUNDLE_DIR}" "${RESOLVED_VERSION}"
-elif [[ -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" && -x "${ROOT_DIR}/bin/theta-mcp" ]]; then
+elif [[ -n "${ROOT_DIR}" && -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" && -x "${ROOT_DIR}/bin/theta-mcp" ]]; then
   install_bundle "${ROOT_DIR}" "${VERSION}"
 else
   download_and_install_release
