@@ -10,7 +10,6 @@ User=%i
 WorkingDirectory=%h
 Environment=HOME=%h
 Environment=RUST_LOG=info
-EnvironmentFile=-%h/.config/theta/config.env
 ExecStartPre=/bin/sh -c 'socket_path="${THETA_SOCKET_PATH:-$HOME/.theta/run/theta.sock}"; for _ in $(seq 1 30); do [ -S "$socket_path" ] && exit 0; sleep 1; done; echo "theta-daemon socket not ready: $socket_path" >&2; exit 1'
 ExecStart=/usr/local/bin/theta signals capture --loop --every-seconds 300 --market-hours-only
 Restart=always

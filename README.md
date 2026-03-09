@@ -166,7 +166,7 @@ For VPS deployment, the installer puts these unit templates in `/etc/systemd/sys
 - `deploy/theta-healthcheck.timer`: optionally runs the live health check once per day.
 
 `capture-signals` and `account-monitor` depend on `theta-daemon`, and each unit waits for the daemon socket before starting work.
-Only `theta-daemon` needs LongPort credentials; the other units only read optional runtime overrides from `config.env`.
+Only `theta-daemon` needs LongPort credentials. The other units do not need any credential or config `EnvironmentFile` by default.
 
 Set LongPort API credentials for the daemon in:
 
