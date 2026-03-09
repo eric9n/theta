@@ -673,8 +673,8 @@ async fn main() -> SdkResult<()> {
 mod tests {
     use super::{
         GetPortfolioArgs, latest_account_snapshot_required, market_extreme_is_abnormal,
-        market_extreme_row_is_from_date, market_extreme_score, screen_market_extremes,
-        screen_market_extremes_for_date, screen_relative_extremes,
+        market_extreme_row_is_from_date, market_extreme_score, screen_market_extremes_for_date,
+        screen_relative_extremes,
     };
     use theta::domain::{
         MarketToneSummary, MarketToneView, PutCallBiasView, PutCallSideTotals, SkewSignalView,
@@ -746,11 +746,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("signals.db");
         let store = SignalSnapshotStore::open(&db_path).expect("store opens");
+        let today =
+            time::Date::from_calendar_date(2026, time::Month::March, 8).expect("valid date");
         seed_market_extreme_samples(&store, "QQQ.US", 1.2, 1.1, 3);
         seed_market_extreme_samples(&store, "TSLA.US", 2.9, 0.4, 3);
         seed_market_extreme_samples(&store, "SPY.US", 2.1, 0.3, 3);
 
-        let market = screen_market_extremes(&store, 252, 2).expect("market extremes");
+        let market =
+            screen_market_extremes_for_date(&store, 252, 2, today).expect("market extremes");
         let relative = screen_relative_extremes(&store, 252, 10).expect("relative extremes");
 
         assert_eq!(market.len(), 2);
