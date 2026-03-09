@@ -196,6 +196,7 @@ pub fn is_transient_quote_rate_limit_message(message: &str) -> bool {
     extract_provider_code(message).is_some_and(is_rate_limit_code)
         || message.contains("Request rate limit")
         || message.contains("Too many option securities request within one minute")
+        || message.contains("local option_quote cooldown active")
 }
 
 pub fn is_transient_quote_rate_limit_error(err: &anyhow::Error) -> bool {
@@ -241,5 +242,14 @@ mod tests {
 
         assert!(is_transient_quote_rate_limit_error(&err));
         assert!(is_provider_code(&err, 301606));
+    }
+
+    #[test]
+    fn local_cooldown_rate_limit_errors_are_detectable() {
+        let err = anyhow!(
+            "theta daemon Provider error [option_quote]: local option_quote cooldown active for 42s after upstream rate limit"
+        );
+
+        assert!(is_transient_quote_rate_limit_error(&err));
     }
 }

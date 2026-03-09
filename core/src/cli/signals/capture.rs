@@ -258,6 +258,9 @@ mod tests {
         assert!(is_transient_quote_limit_error(&anyhow!(
             "SDK Proxy Error [option_quote]: response error: 301606 Request rate limit"
         )));
+        assert!(is_transient_quote_limit_error(&anyhow!(
+            "theta daemon Provider error [option_quote]: local option_quote cooldown active for 42s after upstream rate limit"
+        )));
     }
 
     #[test]
