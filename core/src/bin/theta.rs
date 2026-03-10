@@ -1,18 +1,23 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{
     generate,
     shells::{Bash, Elvish, Fish, PowerShell, Zsh},
 };
 use std::io;
+use std::path::PathBuf;
 use theta::cli::{ops, portfolio, signals, snapshot, structure};
 
 #[derive(Parser, Debug)]
 #[command(name = "theta")]
 #[command(about = "Unified CLI for market snapshots, structure signals, and portfolio tracking")]
+#[command(disable_version_flag = true)]
 struct ThetaCli {
+    #[arg(short = 'V', long = "version", action = ArgAction::SetTrue, global = true)]
+    version: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -50,6 +55,36 @@ fn emit_completion(shell: CompletionShell) {
         CompletionShell::Powershell => generate(PowerShell, &mut cmd, "theta", &mut io::stdout()),
         CompletionShell::Zsh => generate(Zsh, &mut cmd, "theta", &mut io::stdout()),
     }
+}
+
+fn resolved_version() -> String {
+    candidate_version_files()
+        .into_iter()
+        .find_map(|path| {
+            std::fs::read_to_string(path).ok().and_then(|contents| {
+                let version = contents.trim();
+                (!version.is_empty()).then(|| version.to_string())
+            })
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+fn candidate_version_files() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(version_file) = std::env::var("THETA_VERSION_FILE") {
+        paths.push(PathBuf::from(version_file));
+    }
+
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(bin_dir) = exe_path.parent()
+        && let Some(prefix_dir) = bin_dir.parent()
+    {
+        paths.push(prefix_dir.join("share").join("theta").join("VERSION"));
+    }
+
+    paths.push(PathBuf::from("/usr/local/share/theta/VERSION"));
+    paths
 }
 
 #[derive(clap::Args, Debug)]
@@ -102,7 +137,19 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = ThetaCli::parse();
-    match cli.command {
+    if cli.version {
+        println!("{}", resolved_version());
+        return Ok(());
+    }
+
+    let Some(command) = cli.command else {
+        let mut cmd = ThetaCli::command();
+        cmd.print_help()?;
+        println!();
+        return Ok(());
+    };
+
+    match command {
         Command::Snapshot(cli) => snapshot::run(cli).await,
         Command::Portfolio(cli) => portfolio::run(cli).await,
         Command::Signals(signals) => match signals.command {

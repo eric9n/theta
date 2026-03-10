@@ -20,6 +20,20 @@ fn theta_help_lists_top_level_commands() {
 }
 
 #[test]
+fn theta_version_reads_explicit_version_file() {
+    let dir = tempdir().unwrap();
+    let version_file = dir.path().join("VERSION");
+    std::fs::write(&version_file, "v0.1.12-test\n").unwrap();
+
+    let mut cmd = theta_cmd();
+    cmd.env("THETA_VERSION_FILE", version_file.to_str().unwrap())
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::eq("v0.1.12-test\n"));
+}
+
+#[test]
 fn theta_completion_bash_outputs_completion_script() {
     let mut cmd = theta_cmd();
     cmd.args(["completion", "--shell", "bash"])
