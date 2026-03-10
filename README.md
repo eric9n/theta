@@ -31,8 +31,6 @@ cargo build --release -p theta-daemon
 Set `THETA_SOCKET_PATH` to override the socket location for both `theta-daemon` and the `theta` CLI.
 LongPort credentials are required by `theta-daemon`, not by the `theta` CLI process itself.
 
-For MCP clients, use the `theta-mcp` binary.
-
 Optional config file:
 
 - default path: `~/.theta/config.json`
@@ -60,7 +58,6 @@ This installs:
 
 - `/usr/local/bin/theta`
 - `/usr/local/bin/theta-daemon`
-- `/usr/local/bin/theta-mcp`
 - `/usr/local/share/theta/skills`
 - `/etc/systemd/system/theta-daemon@.service`
 - `/etc/systemd/system/capture-signals@.service`
@@ -91,16 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh
 ```
 
 The old source checkout at `~/theta` or `/root/theta` is not required.
-
-## MCP
-
-Run the MCP adapter over stdio with:
-
-```bash
-/usr/local/bin/theta-mcp
-```
-
-Old references to `mcp-server` are no longer valid.
+Agent integrations should use the shared files under `skills/` instead of an MCP adapter.
 
 ## Snapshot
 
@@ -224,7 +212,6 @@ The GitHub release archive is structured so it can be unpacked directly on a VPS
 
 - `bin/theta`
 - `bin/theta-daemon`
-- `bin/theta-mcp`
 - `deploy/`
 - `scripts/theta.sh`
 - `skills/`

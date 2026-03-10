@@ -8,18 +8,11 @@ autobins = false
 name = "theta"
 path = "src/bin/theta.rs"
 
-[[bin]]
-name = "theta-mcp"
-path = "src/bin/mcp_server.rs"
-
 [dependencies]
 anyhow = "1.0"
-async-trait = "0.1.89"
 clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.52"
 dotenvy = "0.15"
-rust-mcp-sdk = { version = "0.8.3", features = ["server", "stdio", "macros"] }
-schemars = "0.8"
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -29,7 +22,7 @@ time = { version = "0.3", features = [
   "macros",
   "serde",
 ] }
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

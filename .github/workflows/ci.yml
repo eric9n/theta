@@ -45,7 +45,6 @@ jobs:
           mkdir -p dist/bin dist/deploy dist/scripts
           cp target/release/theta dist/bin/
           cp target/release/theta-daemon dist/bin/
-          cp target/release/theta-mcp dist/bin/
           printf '%s\n' 'dev' > dist/VERSION
           cp README.md dist/
           cp deploy/*.service dist/deploy/

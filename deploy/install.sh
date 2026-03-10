@@ -96,7 +96,7 @@ install_bundle() {
   fi
 
   current_version="$(installed_version || true)"
-  if [[ -n "${version}" && "${FORCE_INSTALL}" != "1" && "${current_version}" == "${version}" && -x "${PREFIX}/theta" && -x "${PREFIX}/theta-daemon" && -x "${PREFIX}/theta-mcp" ]]; then
+  if [[ -n "${version}" && "${FORCE_INSTALL}" != "1" && "${current_version}" == "${version}" && -x "${PREFIX}/theta" && -x "${PREFIX}/theta-daemon" ]]; then
     echo "theta ${version} is already installed in ${PREFIX}"
     return 0
   fi
@@ -108,12 +108,11 @@ install_bundle() {
   install -d "${PREFIX}"
   install -m 0755 "${bundle_dir}/bin/theta" "${PREFIX}/theta"
   install -m 0755 "${bundle_dir}/bin/theta-daemon" "${PREFIX}/theta-daemon"
-  install -m 0755 "${bundle_dir}/bin/theta-mcp" "${PREFIX}/theta-mcp"
+  rm -f "${PREFIX}/theta-mcp"
 
   echo "Installed theta binaries to ${PREFIX}:"
   echo "  ${PREFIX}/theta"
   echo "  ${PREFIX}/theta-daemon"
-  echo "  ${PREFIX}/theta-mcp"
 
   if [[ "${INSTALL_COMPLETIONS}" != "0" ]]; then
     install -d "${BASH_COMPLETION_DIR}"
@@ -241,7 +240,7 @@ done
 
 if [[ -n "${INTERNAL_BUNDLE_DIR}" ]]; then
   install_bundle "${INTERNAL_BUNDLE_DIR}" "${RESOLVED_VERSION}"
-elif [[ -n "${ROOT_DIR}" && -f "${ROOT_DIR}/deploy/install.sh" && -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" && -x "${ROOT_DIR}/bin/theta-mcp" ]]; then
+elif [[ -n "${ROOT_DIR}" && -f "${ROOT_DIR}/deploy/install.sh" && -x "${ROOT_DIR}/bin/theta" && -x "${ROOT_DIR}/bin/theta-daemon" ]]; then
   install_bundle "${ROOT_DIR}" "${VERSION}"
 else
   download_and_install_release

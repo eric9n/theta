@@ -167,7 +167,7 @@ fn is_weekend(date: Date) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::Ledger;
+    use crate::ledger::{AccountSnapshotInput, Ledger};
     use tempfile::tempdir;
 
     fn temp_ledger() -> Ledger {
@@ -198,18 +198,16 @@ mod tests {
             )
             .unwrap();
         ledger
-            .record_account_snapshot(
-                "2026-03-06T09:30:00Z",
-                9_000.0,
-                9_000.0,
-                None,
-                None,
-                None,
-                None,
-                true,
-                "manual set",
-                "firstrade",
-            )
+            .record_account_snapshot(&AccountSnapshotInput {
+                snapshot_at: "2026-03-06T09:30:00Z".to_string(),
+                trade_date_cash: 9_000.0,
+                settled_cash: 9_000.0,
+                cash_balance: Some(9_000.0),
+                margin_enabled: true,
+                notes: "manual set".to_string(),
+                account_id: "firstrade".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         ledger
             .record_trade(
@@ -304,18 +302,16 @@ mod tests {
             )
             .unwrap();
         ledger
-            .record_account_snapshot(
-                "2026-03-06T09:30:00Z",
-                9_000.0,
-                9_000.0,
-                None,
-                None,
-                None,
-                None,
-                true,
-                "manual set",
-                "firstrade",
-            )
+            .record_account_snapshot(&AccountSnapshotInput {
+                snapshot_at: "2026-03-06T09:30:00Z".to_string(),
+                trade_date_cash: 9_000.0,
+                settled_cash: 9_000.0,
+                cash_balance: Some(9_000.0),
+                margin_enabled: true,
+                notes: "manual set".to_string(),
+                account_id: "firstrade".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         ledger
             .record_trade(

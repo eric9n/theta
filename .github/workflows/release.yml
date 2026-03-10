@@ -38,7 +38,6 @@ jobs:
           mkdir -p dist/bin dist/deploy dist/scripts
           cp target/release/theta dist/bin/
           cp target/release/theta-daemon dist/bin/
-          cp target/release/theta-mcp dist/bin/
           printf '%s\n' '${{ github.ref_name }}' > dist/VERSION
           cp README.md dist/
           cp deploy/*.service dist/deploy/

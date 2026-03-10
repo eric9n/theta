@@ -60,10 +60,34 @@ pub struct AccountSnapshot {
     pub snapshot_at: String,
     /// Highest trade id already reflected in this snapshot, if known
     pub baseline_trade_id: Option<i64>,
+    pub cash_balance: Option<f64>,
     pub trade_date_cash: f64,
     pub settled_cash: f64,
     pub option_buying_power: Option<f64>,
     pub stock_buying_power: Option<f64>,
+    pub total_account_value: Option<f64>,
+    pub long_stock_value: Option<f64>,
+    pub long_option_value: Option<f64>,
+    pub short_option_value: Option<f64>,
+    pub margin_loan: Option<f64>,
+    pub short_market_value: Option<f64>,
+    pub margin_enabled: bool,
+    pub notes: String,
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AccountSnapshotInput {
+    pub snapshot_at: String,
+    pub trade_date_cash: f64,
+    pub settled_cash: f64,
+    pub cash_balance: Option<f64>,
+    pub option_buying_power: Option<f64>,
+    pub stock_buying_power: Option<f64>,
+    pub total_account_value: Option<f64>,
+    pub long_stock_value: Option<f64>,
+    pub long_option_value: Option<f64>,
+    pub short_option_value: Option<f64>,
     pub margin_loan: Option<f64>,
     pub short_market_value: Option<f64>,
     pub margin_enabled: bool,
@@ -190,10 +214,15 @@ impl Ledger {
                 id                  INTEGER PRIMARY KEY,
                 snapshot_at         TEXT    NOT NULL,
                 baseline_trade_id   INTEGER,
+                cash_balance        REAL,
                 trade_date_cash     REAL    NOT NULL,
                 settled_cash        REAL    NOT NULL,
                 option_buying_power REAL,
                 stock_buying_power  REAL,
+                total_account_value REAL,
+                long_stock_value    REAL,
+                long_option_value   REAL,
+                short_option_value  REAL,
                 margin_loan         REAL,
                 short_market_value  REAL,
                 margin_enabled      BOOLEAN NOT NULL,
@@ -352,36 +381,33 @@ impl Ledger {
         Ok(affected > 0)
     }
 
-    pub fn record_account_snapshot(
-        &self,
-        snapshot_at: &str,
-        trade_date_cash: f64,
-        settled_cash: f64,
-        option_buying_power: Option<f64>,
-        stock_buying_power: Option<f64>,
-        margin_loan: Option<f64>,
-        short_market_value: Option<f64>,
-        margin_enabled: bool,
-        notes: &str,
-        account_id: &str,
-    ) -> Result<i64> {
-        let baseline_trade_id = self.latest_trade_id(account_id)?;
+    pub fn record_account_snapshot(&self, input: &AccountSnapshotInput) -> Result<i64> {
+        let baseline_trade_id = self.latest_trade_id(&input.account_id)?;
         self.conn.execute(
-            "INSERT INTO account_snapshots (snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO account_snapshots (
+                snapshot_at, baseline_trade_id, cash_balance, trade_date_cash, settled_cash,
+                option_buying_power, stock_buying_power, total_account_value,
+                long_stock_value, long_option_value, short_option_value,
+                margin_loan, short_market_value, margin_enabled, notes, account_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
-                snapshot_at,
+                &input.snapshot_at,
                 baseline_trade_id,
-                trade_date_cash,
-                settled_cash,
-                option_buying_power,
-                stock_buying_power,
-                margin_loan,
-                short_market_value,
-                margin_enabled,
-                notes,
-                account_id,
-             ],
+                input.cash_balance,
+                input.trade_date_cash,
+                input.settled_cash,
+                input.option_buying_power,
+                input.stock_buying_power,
+                input.total_account_value,
+                input.long_stock_value,
+                input.long_option_value,
+                input.short_option_value,
+                input.margin_loan,
+                input.short_market_value,
+                input.margin_enabled,
+                &input.notes,
+                &input.account_id,
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -649,7 +675,10 @@ impl Ledger {
 
     pub fn latest_account_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, cash_balance, trade_date_cash, settled_cash,
+                    option_buying_power, stock_buying_power, total_account_value,
+                    long_stock_value, long_option_value, short_option_value,
+                    margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots 
              WHERE account_id = ?
              ORDER BY snapshot_at DESC, id DESC LIMIT 1",
@@ -659,15 +688,20 @@ impl Ledger {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
                 baseline_trade_id: row.get(2)?,
-                trade_date_cash: row.get(3)?,
-                settled_cash: row.get(4)?,
-                option_buying_power: row.get(5)?,
-                stock_buying_power: row.get(6)?,
-                margin_loan: row.get(7)?,
-                short_market_value: row.get(8)?,
-                margin_enabled: row.get(9)?,
-                notes: row.get(10)?,
-                account_id: row.get(11)?,
+                cash_balance: row.get(3)?,
+                trade_date_cash: row.get(4)?,
+                settled_cash: row.get(5)?,
+                option_buying_power: row.get(6)?,
+                stock_buying_power: row.get(7)?,
+                total_account_value: row.get(8)?,
+                long_stock_value: row.get(9)?,
+                long_option_value: row.get(10)?,
+                short_option_value: row.get(11)?,
+                margin_loan: row.get(12)?,
+                short_market_value: row.get(13)?,
+                margin_enabled: row.get(14)?,
+                notes: row.get(15)?,
+                account_id: row.get(16)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -677,7 +711,10 @@ impl Ledger {
     /// This is used as a checkpoint/baseline for balance derivation.
     pub fn latest_manual_snapshot(&self, account_id: &str) -> Result<Option<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, cash_balance, trade_date_cash, settled_cash,
+                    option_buying_power, stock_buying_power, total_account_value,
+                    long_stock_value, long_option_value, short_option_value,
+                    margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots 
              WHERE notes NOT LIKE 'auto-update%' AND account_id = ?
              ORDER BY snapshot_at DESC, id DESC LIMIT 1",
@@ -687,15 +724,20 @@ impl Ledger {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
                 baseline_trade_id: row.get(2)?,
-                trade_date_cash: row.get(3)?,
-                settled_cash: row.get(4)?,
-                option_buying_power: row.get(5)?,
-                stock_buying_power: row.get(6)?,
-                margin_loan: row.get(7)?,
-                short_market_value: row.get(8)?,
-                margin_enabled: row.get(9)?,
-                notes: row.get(10)?,
-                account_id: row.get(11)?,
+                cash_balance: row.get(3)?,
+                trade_date_cash: row.get(4)?,
+                settled_cash: row.get(5)?,
+                option_buying_power: row.get(6)?,
+                stock_buying_power: row.get(7)?,
+                total_account_value: row.get(8)?,
+                long_stock_value: row.get(9)?,
+                long_option_value: row.get(10)?,
+                short_option_value: row.get(11)?,
+                margin_loan: row.get(12)?,
+                short_market_value: row.get(13)?,
+                margin_enabled: row.get(14)?,
+                notes: row.get(15)?,
+                account_id: row.get(16)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -703,7 +745,10 @@ impl Ledger {
 
     pub fn list_account_snapshots(&self, account_id: &str) -> Result<Vec<AccountSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, snapshot_at, baseline_trade_id, trade_date_cash, settled_cash, option_buying_power, stock_buying_power, margin_loan, short_market_value, margin_enabled, notes, account_id
+            "SELECT id, snapshot_at, baseline_trade_id, cash_balance, trade_date_cash, settled_cash,
+                    option_buying_power, stock_buying_power, total_account_value,
+                    long_stock_value, long_option_value, short_option_value,
+                    margin_loan, short_market_value, margin_enabled, notes, account_id
              FROM account_snapshots
              WHERE account_id = ?
              ORDER BY snapshot_at DESC, id DESC",
@@ -713,15 +758,20 @@ impl Ledger {
                 id: row.get(0)?,
                 snapshot_at: row.get(1)?,
                 baseline_trade_id: row.get(2)?,
-                trade_date_cash: row.get(3)?,
-                settled_cash: row.get(4)?,
-                option_buying_power: row.get(5)?,
-                stock_buying_power: row.get(6)?,
-                margin_loan: row.get(7)?,
-                short_market_value: row.get(8)?,
-                margin_enabled: row.get(9)?,
-                notes: row.get(10)?,
-                account_id: row.get(11)?,
+                cash_balance: row.get(3)?,
+                trade_date_cash: row.get(4)?,
+                settled_cash: row.get(5)?,
+                option_buying_power: row.get(6)?,
+                stock_buying_power: row.get(7)?,
+                total_account_value: row.get(8)?,
+                long_stock_value: row.get(9)?,
+                long_option_value: row.get(10)?,
+                short_option_value: row.get(11)?,
+                margin_loan: row.get(12)?,
+                short_market_value: row.get(13)?,
+                margin_enabled: row.get(14)?,
+                notes: row.get(15)?,
+                account_id: row.get(16)?,
             })
         })?;
 
@@ -783,18 +833,43 @@ impl Ledger {
 
     fn ensure_account_snapshots_columns(&self) -> Result<()> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(account_snapshots)")?;
-        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        let mut has_baseline_trade_id = false;
-        for column in columns {
-            if column? == "baseline_trade_id" {
-                has_baseline_trade_id = true;
-                break;
-            }
-        }
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        if !has_baseline_trade_id {
+        if !columns.iter().any(|column| column == "baseline_trade_id") {
             self.conn.execute(
                 "ALTER TABLE account_snapshots ADD COLUMN baseline_trade_id INTEGER",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "cash_balance") {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN cash_balance REAL",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "total_account_value") {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN total_account_value REAL",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "long_stock_value") {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN long_stock_value REAL",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "long_option_value") {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN long_option_value REAL",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|column| column == "short_option_value") {
+            self.conn.execute(
+                "ALTER TABLE account_snapshots ADD COLUMN short_option_value REAL",
                 [],
             )?;
         }
@@ -1192,18 +1267,23 @@ mod tests {
             )
             .unwrap();
         let id = ledger
-            .record_account_snapshot(
-                "2026-03-02T09:30:00Z",
-                50_000.0,
-                50_000.0,
-                Some(120_000.0),
-                None,
-                None,
-                None,
-                true,
-                "initial snapshot",
-                "firstrade",
-            )
+            .record_account_snapshot(&AccountSnapshotInput {
+                snapshot_at: "2026-03-02T09:30:00Z".to_string(),
+                trade_date_cash: 50_000.0,
+                settled_cash: 50_000.0,
+                cash_balance: Some(50_500.0),
+                option_buying_power: Some(120_000.0),
+                stock_buying_power: Some(200_000.0),
+                total_account_value: Some(75_000.0),
+                long_stock_value: Some(15_000.0),
+                long_option_value: Some(3_500.0),
+                short_option_value: Some(-2_250.0),
+                margin_loan: None,
+                short_market_value: None,
+                margin_enabled: true,
+                notes: "initial snapshot".to_string(),
+                account_id: "firstrade".to_string(),
+            })
             .unwrap();
         assert_eq!(id, 1);
 
@@ -1212,9 +1292,15 @@ mod tests {
             .unwrap()
             .expect("snapshot");
         assert_eq!(latest.baseline_trade_id, Some(1));
+        assert_eq!(latest.cash_balance, Some(50_500.0));
         assert_eq!(latest.trade_date_cash, 50_000.0);
         assert_eq!(latest.settled_cash, 50_000.0);
         assert_eq!(latest.option_buying_power, Some(120_000.0));
+        assert_eq!(latest.stock_buying_power, Some(200_000.0));
+        assert_eq!(latest.total_account_value, Some(75_000.0));
+        assert_eq!(latest.long_stock_value, Some(15_000.0));
+        assert_eq!(latest.long_option_value, Some(3_500.0));
+        assert_eq!(latest.short_option_value, Some(-2_250.0));
         assert!(latest.margin_enabled);
         assert_eq!(latest.notes, "initial snapshot");
     }
@@ -1253,6 +1339,11 @@ mod tests {
             .unwrap();
 
         assert!(columns.iter().any(|name| name == "baseline_trade_id"));
+        assert!(columns.iter().any(|name| name == "cash_balance"));
+        assert!(columns.iter().any(|name| name == "total_account_value"));
+        assert!(columns.iter().any(|name| name == "long_stock_value"));
+        assert!(columns.iter().any(|name| name == "long_option_value"));
+        assert!(columns.iter().any(|name| name == "short_option_value"));
     }
 
     #[test]
