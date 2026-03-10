@@ -42,7 +42,7 @@ jobs:
 
       - name: Prepare release bundle
         run: |
-          mkdir -p dist/bin dist/deploy dist/scripts
+          mkdir -p dist/bin dist/deploy
           cp target/release/theta dist/bin/
           cp target/release/theta-daemon dist/bin/
           printf '%s\n' 'dev' > dist/VERSION
@@ -50,10 +50,8 @@ jobs:
           cp deploy/*.service dist/deploy/
           cp deploy/*.timer dist/deploy/
           cp deploy/*.sh dist/deploy/
-          cp scripts/theta.sh dist/scripts/
           cp -R skills dist/
           chmod +x dist/deploy/*.sh
-          chmod +x dist/scripts/theta.sh
           tar -czf theta-linux-x86_64.tar.gz -C dist .
 
       - name: Upload release bundle

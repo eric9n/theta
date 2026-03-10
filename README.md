@@ -213,7 +213,6 @@ The GitHub release archive is structured so it can be unpacked directly on a VPS
 - `bin/theta`
 - `bin/theta-daemon`
 - `deploy/`
-- `scripts/theta.sh`
 - `skills/`
 - `VERSION`
 
