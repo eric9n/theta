@@ -1485,6 +1485,7 @@ fn now_rfc3339() -> String {
 }
 
 fn render_account_snapshot(s: &AccountSnapshot) {
+    let derived_estimated = snapshot_uses_estimated_overview(s);
     println!(
         "{:>5}  {:<25}  {:<8}  {}",
         s.id,
@@ -1504,10 +1505,13 @@ fn render_account_snapshot(s: &AccountSnapshot) {
         || s.total_account_value.is_some()
     {
         println!(
-            "       {:<25}  Option BP: {:>9}  Margin BP: {:>9}  Equity: {:>12}",
+            "       {:<25}  {:<15} {:>9}  {:<15} {:>9}  {:<12} {:>12}",
             "",
+            metric_label("Option BP", derived_estimated),
             format_optional_money(s.option_buying_power),
+            metric_label("Margin BP", derived_estimated),
             format_optional_money(s.stock_buying_power),
+            metric_label("Equity", derived_estimated),
             format_optional_money(s.total_account_value),
         );
     }
@@ -1516,18 +1520,23 @@ fn render_account_snapshot(s: &AccountSnapshot) {
         || s.short_option_value.is_some()
     {
         println!(
-            "       {:<25}  Long Stock: {:>8}  Long Opt: {:>9}  Short Opt: {:>9}",
+            "       {:<25}  {:<18} {:>8}  {:<16} {:>9}  {:<16} {:>9}",
             "",
+            metric_label("Long Stock", derived_estimated),
             format_optional_money(s.long_stock_value),
+            metric_label("Long Opt", derived_estimated),
             format_optional_money(s.long_option_value),
+            metric_label("Short Opt", derived_estimated),
             format_optional_money(s.short_option_value),
         );
     }
     if s.margin_loan.is_some() || s.short_market_value.is_some() {
         println!(
-            "       {:<25}  Margin Loan: {:>7}  Short Stock: {:>8}",
+            "       {:<25}  {:<18} {:>7}  {:<18} {:>8}",
             "",
+            metric_label("Margin Loan", derived_estimated),
             format_optional_money(s.margin_loan),
+            metric_label("Short Stock", derived_estimated),
             format_optional_money(s.short_market_value),
         );
     }
@@ -1550,6 +1559,33 @@ fn render_account_monitor_snapshot(s: &AccountMonitorSnapshot) {
     );
     if let Some(error_message) = &s.error_message {
         println!("       error: {}", error_message);
+    }
+}
+
+fn snapshot_uses_estimated_overview(snapshot: &AccountSnapshot) -> bool {
+    snapshot.notes.starts_with("auto-update after trade on ")
+        || snapshot
+            .notes
+            .starts_with("rebuilt cash snapshot from ledger as of ")
+}
+
+fn metric_label(label: &'static str, estimated: bool) -> &'static str {
+    match (label, estimated) {
+        ("Cash Balance", true) => "Cash Balance (est)",
+        ("Option BP", true) => "Option BP (est)",
+        ("Margin BP", true) => "Margin BP (est)",
+        ("Equity", true) => "Equity (est)",
+        ("Total Equity", true) => "Total Equity (est)",
+        ("Long Stock", true) => "Long Stock (est)",
+        ("Long Stock MV", true) => "Long Stock MV (est)",
+        ("Long Opt", true) => "Long Opt (est)",
+        ("Long Option MV", true) => "Long Option MV (est)",
+        ("Short Opt", true) => "Short Opt (est)",
+        ("Short Option MV", true) => "Short Option MV (est)",
+        ("Margin Loan", true) => "Margin Loan (est)",
+        ("Short Stock", true) => "Short Stock (est)",
+        ("Short Stock MV", true) => "Short Stock MV (est)",
+        _ => label,
     }
 }
 
@@ -1762,42 +1798,66 @@ async fn handle_report(
     // -- Account --
     println!("\u{2550}\u{2550}\u{2550} ACCOUNT \u{2550}\u{2550}\u{2550}");
     println!("Snapshot        : {}", account_snapshot.snapshot_at);
+    let derived_estimated = snapshot_uses_estimated_overview(&account_snapshot);
     if let Some(cash_balance) = account_snapshot.cash_balance {
-        println!("Cash Balance    : ${cash_balance:.2}");
+        println!(
+            "{:<15}: ${cash_balance:.2}",
+            metric_label("Cash Balance", derived_estimated)
+        );
     }
     println!("Trade-date Cash : ${:.2}", account_snapshot.trade_date_cash);
     println!("Settled Cash    : ${:.2}", account_snapshot.settled_cash);
     println!(
-        "Option BP       : {}",
+        "{:<15}: {}",
+        metric_label("Option BP", derived_estimated),
         account_snapshot
             .option_buying_power
             .map(|v| format!("${v:.2}"))
             .unwrap_or_else(|| "-".to_string())
     );
     println!(
-        "Margin BP       : {}",
+        "{:<15}: {}",
+        metric_label("Margin BP", derived_estimated),
         account_snapshot
             .stock_buying_power
             .map(|v| format!("${v:.2}"))
             .unwrap_or_else(|| "-".to_string())
     );
     if let Some(total_account_value) = account_snapshot.total_account_value {
-        println!("Total Equity    : ${total_account_value:.2}");
+        println!(
+            "{:<15}: ${total_account_value:.2}",
+            metric_label("Total Equity", derived_estimated)
+        );
     }
     if let Some(long_stock_value) = account_snapshot.long_stock_value {
-        println!("Long Stock MV   : ${long_stock_value:.2}");
+        println!(
+            "{:<15}: ${long_stock_value:.2}",
+            metric_label("Long Stock MV", derived_estimated)
+        );
     }
     if let Some(long_option_value) = account_snapshot.long_option_value {
-        println!("Long Option MV  : ${long_option_value:.2}");
+        println!(
+            "{:<15}: ${long_option_value:.2}",
+            metric_label("Long Option MV", derived_estimated)
+        );
     }
     if let Some(short_option_value) = account_snapshot.short_option_value {
-        println!("Short Option MV : ${short_option_value:.2}");
+        println!(
+            "{:<15}: ${short_option_value:.2}",
+            metric_label("Short Option MV", derived_estimated)
+        );
     }
     if let Some(margin_loan) = account_snapshot.margin_loan {
-        println!("Margin Loan     : ${margin_loan:.2}");
+        println!(
+            "{:<15}: ${margin_loan:.2}",
+            metric_label("Margin Loan", derived_estimated)
+        );
     }
     if let Some(short_market_value) = account_snapshot.short_market_value {
-        println!("Short Stock MV  : ${short_market_value:.2}");
+        println!(
+            "{:<15}: ${short_market_value:.2}",
+            metric_label("Short Stock MV", derived_estimated)
+        );
     }
     println!(
         "Margin enabled  : {}",
@@ -2129,9 +2189,10 @@ fn summarize_account_market_values(
 mod tests {
     use super::{
         estimate_margin_loan, estimate_option_buying_power, estimate_stock_buying_power,
-        load_positions_for_enrichment, summarize_account_market_values,
+        load_positions_for_enrichment, metric_label, snapshot_uses_estimated_overview,
+        summarize_account_market_values,
     };
-    use crate::ledger::{Ledger, Position};
+    use crate::ledger::{AccountSnapshot, Ledger, Position};
     use crate::risk_domain::EnrichedPosition;
     use tempfile::tempdir;
 
@@ -2347,5 +2408,59 @@ mod tests {
         assert_eq!(summary.short_option_value, -320.0);
         assert_eq!(summary.short_market_value, 0.0);
         assert_eq!(summary.total_account_value, 180.0);
+    }
+
+    #[test]
+    fn auto_snapshots_mark_overview_fields_as_estimated() {
+        let snapshot = AccountSnapshot {
+            id: 1,
+            account_id: "firstrade".to_string(),
+            snapshot_at: "2026-03-10T00:00:00Z".to_string(),
+            trade_date_cash: 100.0,
+            settled_cash: 100.0,
+            option_buying_power: Some(100.0),
+            stock_buying_power: Some(200.0),
+            margin_enabled: true,
+            margin_loan: Some(0.0),
+            short_market_value: Some(0.0),
+            notes: "auto-update after trade on 2026-03-10".to_string(),
+            baseline_trade_id: None,
+            cash_balance: Some(100.0),
+            total_account_value: Some(100.0),
+            long_stock_value: Some(0.0),
+            long_option_value: Some(0.0),
+            short_option_value: Some(0.0),
+        };
+
+        assert!(snapshot_uses_estimated_overview(&snapshot));
+        assert_eq!(metric_label("Margin BP", true), "Margin BP (est)");
+        assert_eq!(metric_label("Margin Loan", true), "Margin Loan (est)");
+    }
+
+    #[test]
+    fn manual_snapshots_keep_broker_labels_plain() {
+        let snapshot = AccountSnapshot {
+            id: 1,
+            account_id: "firstrade".to_string(),
+            snapshot_at: "2026-03-10T00:00:00Z".to_string(),
+            trade_date_cash: 100.0,
+            settled_cash: 100.0,
+            option_buying_power: Some(100.0),
+            stock_buying_power: Some(200.0),
+            margin_enabled: true,
+            margin_loan: Some(0.0),
+            short_market_value: Some(0.0),
+            notes: "manual set".to_string(),
+            baseline_trade_id: None,
+            cash_balance: Some(100.0),
+            total_account_value: Some(100.0),
+            long_stock_value: Some(0.0),
+            long_option_value: Some(0.0),
+            short_option_value: Some(0.0),
+        };
+
+        assert!(!snapshot_uses_estimated_overview(&snapshot));
+        assert_eq!(metric_label("Margin BP", false), "Margin BP");
+        assert_eq!(metric_label("Margin Loan", false), "Margin Loan");
     }
 }
