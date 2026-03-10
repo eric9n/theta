@@ -1402,16 +1402,23 @@ fn handle_account(ledger: &Ledger, account_id: &str, action: AccountAction) -> R
 
             let prior_snapshot = ledger.latest_account_snapshot(account_id)?;
             let option_buying_power = prior_snapshot.as_ref().and_then(|s| s.option_buying_power);
-            let stock_buying_power = prior_snapshot.as_ref().and_then(|s| s.stock_buying_power);
             let cash_balance = Some(trade_date_cash);
-            let margin_loan = prior_snapshot.as_ref().and_then(|s| s.margin_loan);
             let margin_enabled = prior_snapshot
                 .as_ref()
                 .map(|s| s.margin_enabled)
                 .unwrap_or(true);
+            let estimated_margin_loan = estimate_margin_loan(settled_cash);
+            let stock_buying_power = Some(estimate_stock_buying_power(
+                option_buying_power.unwrap_or(0.0),
+                margin_enabled,
+            ));
             let positions = ledger.calculate_positions(account_id, None)?;
-            let market_values =
-                summarize_account_market_values(&positions, &[], trade_date_cash, margin_loan);
+            let market_values = summarize_account_market_values(
+                &positions,
+                &[],
+                trade_date_cash,
+                Some(estimated_margin_loan),
+            );
 
             let snapshot_at = now_rfc3339();
             ledger.record_account_snapshot(&AccountSnapshotInput {
@@ -1425,7 +1432,7 @@ fn handle_account(ledger: &Ledger, account_id: &str, action: AccountAction) -> R
                 long_stock_value: Some(market_values.long_stock_value),
                 long_option_value: Some(market_values.long_option_value),
                 short_option_value: Some(market_values.short_option_value),
-                margin_loan,
+                margin_loan: Some(estimated_margin_loan),
                 short_market_value: Some(market_values.short_market_value),
                 margin_enabled,
                 notes: format!("rebuilt cash snapshot from ledger as of {as_of_date}"),
@@ -1994,20 +2001,23 @@ fn record_auto_snapshot(
         .as_ref()
         .map(|s| s.margin_enabled)
         .unwrap_or(true);
-    let stock_buying_power = last_snapshot.as_ref().and_then(|s| s.stock_buying_power);
-    let margin_loan = last_snapshot.as_ref().and_then(|s| s.margin_loan);
+    let estimated_margin_loan = estimate_margin_loan(settled_cash);
 
     let positions = ledger.calculate_positions(account_id, None)?;
     let strategies = risk_engine::identify_strategies(&positions);
-    let market_values =
-        summarize_account_market_values(&positions, enriched, trade_cash, margin_loan);
+    let market_values = summarize_account_market_values(
+        &positions,
+        enriched,
+        trade_cash,
+        Some(estimated_margin_loan),
+    );
 
     let account_ctx = AccountContext {
         trade_date_cash: Some(trade_cash),
         settled_cash: Some(settled_cash),
         option_buying_power: None,
-        stock_buying_power,
-        margin_loan,
+        stock_buying_power: None,
+        margin_loan: Some(estimated_margin_loan),
         short_market_value: Some(market_values.short_market_value),
         margin_enabled,
     };
@@ -2015,6 +2025,8 @@ fn record_auto_snapshot(
     let evaluated = margin_engine::evaluate_strategies(&strategies, enriched, &account_ctx);
     let total_margin: f64 = evaluated.iter().map(|s| s.margin.margin_required).sum();
     let computed_buying_power = estimate_option_buying_power(settled_cash, total_margin);
+    let estimated_stock_buying_power =
+        estimate_stock_buying_power(computed_buying_power, margin_enabled);
 
     let snapshot_at = now_rfc3339();
     ledger.record_account_snapshot(&AccountSnapshotInput {
@@ -2023,12 +2035,12 @@ fn record_auto_snapshot(
         settled_cash,
         cash_balance: Some(trade_cash),
         option_buying_power: Some(computed_buying_power),
-        stock_buying_power,
+        stock_buying_power: Some(estimated_stock_buying_power),
         total_account_value: Some(market_values.total_account_value),
         long_stock_value: Some(market_values.long_stock_value),
         long_option_value: Some(market_values.long_option_value),
         short_option_value: Some(market_values.short_option_value),
-        margin_loan,
+        margin_loan: Some(estimated_margin_loan),
         short_market_value: Some(market_values.short_market_value),
         margin_enabled,
         notes: format!("auto-update after trade on {}", trade_date),
@@ -2043,6 +2055,18 @@ fn record_auto_snapshot(
 
 fn estimate_option_buying_power(settled_cash: f64, total_margin: f64) -> f64 {
     (settled_cash - total_margin).max(0.0)
+}
+
+fn estimate_stock_buying_power(option_buying_power: f64, margin_enabled: bool) -> f64 {
+    if margin_enabled {
+        (option_buying_power.max(0.0)) * 2.0
+    } else {
+        option_buying_power.max(0.0)
+    }
+}
+
+fn estimate_margin_loan(settled_cash: f64) -> f64 {
+    (-settled_cash).max(0.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2104,8 +2128,8 @@ fn summarize_account_market_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_option_buying_power, load_positions_for_enrichment,
-        summarize_account_market_values,
+        estimate_margin_loan, estimate_option_buying_power, estimate_stock_buying_power,
+        load_positions_for_enrichment, summarize_account_market_values,
     };
     use crate::ledger::{Ledger, Position};
     use crate::risk_domain::EnrichedPosition;
@@ -2129,6 +2153,24 @@ mod tests {
     fn estimated_option_buying_power_clamps_at_zero() {
         let option_bp = estimate_option_buying_power(500.0, 1_200.0);
         assert_eq!(option_bp, 0.0);
+    }
+
+    #[test]
+    fn estimated_stock_buying_power_doubles_option_buying_power_for_margin_accounts() {
+        let stock_bp = estimate_stock_buying_power(13_632.92, true);
+        assert!((stock_bp - 27_265.84).abs() < 0.0001);
+    }
+
+    #[test]
+    fn estimated_stock_buying_power_matches_cash_buying_power_without_margin() {
+        let stock_bp = estimate_stock_buying_power(5_000.0, false);
+        assert_eq!(stock_bp, 5_000.0);
+    }
+
+    #[test]
+    fn estimated_margin_loan_clamps_negative_settled_cash() {
+        assert_eq!(estimate_margin_loan(-2_500.0), 2_500.0);
+        assert_eq!(estimate_margin_loan(100.0), 0.0);
     }
 
     #[test]
