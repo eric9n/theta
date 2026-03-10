@@ -1,3 +1,8 @@
+---
+name: theta
+description: Use this skill for the unified theta CLI, including portfolio, signals, structure, snapshot, and operational workflows.
+---
+
 # theta
 
 Use this skill for the unified `theta` CLI.
