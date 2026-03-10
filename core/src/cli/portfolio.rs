@@ -1405,11 +1405,13 @@ fn handle_account(ledger: &Ledger, account_id: &str, action: AccountAction) -> R
             let stock_buying_power = prior_snapshot.as_ref().and_then(|s| s.stock_buying_power);
             let cash_balance = Some(trade_date_cash);
             let margin_loan = prior_snapshot.as_ref().and_then(|s| s.margin_loan);
-            let short_market_value = prior_snapshot.as_ref().and_then(|s| s.short_market_value);
             let margin_enabled = prior_snapshot
                 .as_ref()
                 .map(|s| s.margin_enabled)
                 .unwrap_or(true);
+            let positions = ledger.calculate_positions(account_id, None)?;
+            let market_values =
+                summarize_account_market_values(&positions, &[], trade_date_cash, margin_loan);
 
             let snapshot_at = now_rfc3339();
             ledger.record_account_snapshot(&AccountSnapshotInput {
@@ -1419,12 +1421,12 @@ fn handle_account(ledger: &Ledger, account_id: &str, action: AccountAction) -> R
                 cash_balance,
                 option_buying_power,
                 stock_buying_power,
-                total_account_value: None,
-                long_stock_value: None,
-                long_option_value: None,
-                short_option_value: None,
+                total_account_value: Some(market_values.total_account_value),
+                long_stock_value: Some(market_values.long_stock_value),
+                long_option_value: Some(market_values.long_option_value),
+                short_option_value: Some(market_values.short_option_value),
                 margin_loan,
-                short_market_value,
+                short_market_value: Some(market_values.short_market_value),
                 margin_enabled,
                 notes: format!("rebuilt cash snapshot from ledger as of {as_of_date}"),
                 account_id: account_id.to_string(),
@@ -1994,10 +1996,11 @@ fn record_auto_snapshot(
         .unwrap_or(true);
     let stock_buying_power = last_snapshot.as_ref().and_then(|s| s.stock_buying_power);
     let margin_loan = last_snapshot.as_ref().and_then(|s| s.margin_loan);
-    let short_market_value = last_snapshot.as_ref().and_then(|s| s.short_market_value);
 
     let positions = ledger.calculate_positions(account_id, None)?;
     let strategies = risk_engine::identify_strategies(&positions);
+    let market_values =
+        summarize_account_market_values(&positions, enriched, trade_cash, margin_loan);
 
     let account_ctx = AccountContext {
         trade_date_cash: Some(trade_cash),
@@ -2005,7 +2008,7 @@ fn record_auto_snapshot(
         option_buying_power: None,
         stock_buying_power,
         margin_loan,
-        short_market_value,
+        short_market_value: Some(market_values.short_market_value),
         margin_enabled,
     };
 
@@ -2021,12 +2024,12 @@ fn record_auto_snapshot(
         cash_balance: Some(trade_cash),
         option_buying_power: Some(computed_buying_power),
         stock_buying_power,
-        total_account_value: None,
-        long_stock_value: None,
-        long_option_value: None,
-        short_option_value: None,
+        total_account_value: Some(market_values.total_account_value),
+        long_stock_value: Some(market_values.long_stock_value),
+        long_option_value: Some(market_values.long_option_value),
+        short_option_value: Some(market_values.short_option_value),
         margin_loan,
-        short_market_value,
+        short_market_value: Some(market_values.short_market_value),
         margin_enabled,
         notes: format!("auto-update after trade on {}", trade_date),
         account_id: account_id.to_string(),
@@ -2042,10 +2045,70 @@ fn estimate_option_buying_power(settled_cash: f64, total_margin: f64) -> f64 {
     (settled_cash - total_margin).max(0.0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AccountMarketValueSummary {
+    total_account_value: f64,
+    long_stock_value: f64,
+    short_market_value: f64,
+    long_option_value: f64,
+    short_option_value: f64,
+}
+
+fn summarize_account_market_values(
+    positions: &[crate::ledger::Position],
+    enriched: &[EnrichedPosition],
+    cash_balance: f64,
+    margin_loan: Option<f64>,
+) -> AccountMarketValueSummary {
+    let live_prices: HashMap<&str, f64> = enriched
+        .iter()
+        .map(|position| (position.symbol.as_str(), position.current_price))
+        .collect();
+
+    let mut long_stock_value = 0.0;
+    let mut short_market_value = 0.0;
+    let mut long_option_value = 0.0;
+    let mut short_option_value = 0.0;
+
+    for position in positions {
+        let multiplier = if position.side == "stock" { 1.0 } else { 100.0 };
+        let current_price = live_prices
+            .get(position.symbol.as_str())
+            .copied()
+            .unwrap_or(position.avg_cost);
+        let market_value = current_price * position.net_quantity.unsigned_abs() as f64 * multiplier;
+
+        match (position.side.as_str(), position.net_quantity.signum()) {
+            ("stock", 1) => long_stock_value += market_value,
+            ("stock", -1) => short_market_value += market_value,
+            (_, 1) => long_option_value += market_value,
+            (_, -1) => short_option_value -= market_value,
+            _ => {}
+        }
+    }
+
+    let total_account_value = cash_balance + long_stock_value + long_option_value
+        - short_market_value
+        + short_option_value
+        - margin_loan.unwrap_or(0.0);
+
+    AccountMarketValueSummary {
+        total_account_value,
+        long_stock_value,
+        short_market_value,
+        long_option_value,
+        short_option_value,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{estimate_option_buying_power, load_positions_for_enrichment};
-    use crate::ledger::Ledger;
+    use super::{
+        estimate_option_buying_power, load_positions_for_enrichment,
+        summarize_account_market_values,
+    };
+    use crate::ledger::{Ledger, Position};
+    use crate::risk_domain::EnrichedPosition;
     use tempfile::tempdir;
 
     fn temp_ledger() -> Ledger {
@@ -2132,5 +2195,115 @@ mod tests {
                 .any(|position| position.underlying == "QQQ")
         );
         assert!(positions.iter().all(|position| position.net_quantity == 0));
+    }
+
+    #[test]
+    fn summarize_account_market_values_uses_live_prices_and_current_quantities() {
+        let positions = vec![
+            Position {
+                symbol: "TSLA".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "stock".to_string(),
+                strike: None,
+                expiry: None,
+                net_quantity: 10,
+                avg_cost: 100.0,
+                total_cost: 1_000.0,
+            },
+            Position {
+                symbol: "TSLA260320C00400000".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "call".to_string(),
+                strike: Some(400.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: 1,
+                avg_cost: 5.0,
+                total_cost: 500.0,
+            },
+            Position {
+                symbol: "TSLA260320P00380000".to_string(),
+                underlying: "TSLA".to_string(),
+                side: "put".to_string(),
+                strike: Some(380.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: -2,
+                avg_cost: 4.0,
+                total_cost: 800.0,
+            },
+        ];
+        let enriched = vec![
+            EnrichedPosition {
+                symbol: "TSLA".to_string(),
+                underlying: "TSLA".to_string(),
+                underlying_spot: Some(220.0),
+                side: "stock".to_string(),
+                strike: None,
+                expiry: None,
+                net_quantity: 10,
+                avg_cost: 100.0,
+                current_price: 220.0,
+                unrealized_pnl_per_unit: 120.0,
+                unrealized_pnl: 1_200.0,
+                greeks: None,
+            },
+            EnrichedPosition {
+                symbol: "TSLA260320C00400000".to_string(),
+                underlying: "TSLA".to_string(),
+                underlying_spot: Some(220.0),
+                side: "call".to_string(),
+                strike: Some(400.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: 1,
+                avg_cost: 5.0,
+                current_price: 2.5,
+                unrealized_pnl_per_unit: -2.5,
+                unrealized_pnl: -250.0,
+                greeks: None,
+            },
+            EnrichedPosition {
+                symbol: "TSLA260320P00380000".to_string(),
+                underlying: "TSLA".to_string(),
+                underlying_spot: Some(220.0),
+                side: "put".to_string(),
+                strike: Some(380.0),
+                expiry: Some("2026-03-20".to_string()),
+                net_quantity: -2,
+                avg_cost: 4.0,
+                current_price: 1.25,
+                unrealized_pnl_per_unit: 2.75,
+                unrealized_pnl: 550.0,
+                greeks: None,
+            },
+        ];
+
+        let summary = summarize_account_market_values(&positions, &enriched, 1_000.0, Some(50.0));
+
+        assert_eq!(summary.long_stock_value, 2_200.0);
+        assert_eq!(summary.long_option_value, 250.0);
+        assert_eq!(summary.short_option_value, -250.0);
+        assert_eq!(summary.short_market_value, 0.0);
+        assert_eq!(summary.total_account_value, 3_150.0);
+    }
+
+    #[test]
+    fn summarize_account_market_values_falls_back_to_average_cost_without_live_prices() {
+        let positions = vec![Position {
+            symbol: "TSLA260320P00380000".to_string(),
+            underlying: "TSLA".to_string(),
+            side: "put".to_string(),
+            strike: Some(380.0),
+            expiry: Some("2026-03-20".to_string()),
+            net_quantity: -1,
+            avg_cost: 3.2,
+            total_cost: 320.0,
+        }];
+
+        let summary = summarize_account_market_values(&positions, &[], 500.0, None);
+
+        assert_eq!(summary.long_stock_value, 0.0);
+        assert_eq!(summary.long_option_value, 0.0);
+        assert_eq!(summary.short_option_value, -320.0);
+        assert_eq!(summary.short_market_value, 0.0);
+        assert_eq!(summary.total_account_value, 180.0);
     }
 }
