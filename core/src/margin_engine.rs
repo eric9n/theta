@@ -145,7 +145,13 @@ fn compute_margin(
                 ),
             }
         }
-        StrategyKind::BullCallSpread | StrategyKind::BearPutSpread | StrategyKind::Butterfly => {
+        StrategyKind::BullCallSpread
+        | StrategyKind::BearPutSpread
+        | StrategyKind::CalendarCallSpread
+        | StrategyKind::CalendarPutSpread
+        | StrategyKind::DiagonalCallSpread
+        | StrategyKind::DiagonalPutSpread
+        | StrategyKind::Butterfly => {
             let debit = net_debit(strategy);
             strategy.max_loss = Some(debit.max(0.0));
             StrategyMargin {
@@ -515,6 +521,38 @@ mod tests {
         }
     }
 
+    fn calendar_put_strategy() -> IdentifiedStrategy {
+        IdentifiedStrategy {
+            kind: StrategyKind::CalendarPutSpread,
+            underlying: "TSLA".to_string(),
+            legs: vec![
+                StrategyLeg {
+                    symbol: "TSLA_P385_NEAR".to_string(),
+                    side: "put".to_string(),
+                    strike: Some(385.0),
+                    expiry: Some("2026-03-13".to_string()),
+                    quantity: -1,
+                    price: 5.94,
+                },
+                StrategyLeg {
+                    symbol: "TSLA_P385_FAR".to_string(),
+                    side: "put".to_string(),
+                    strike: Some(385.0),
+                    expiry: Some("2026-03-27".to_string()),
+                    quantity: 1,
+                    price: 10.54,
+                },
+            ],
+            margin: StrategyMargin {
+                margin_required: 123.0,
+                method: "placeholder".to_string(),
+            },
+            max_profit: None,
+            max_loss: None,
+            breakeven: vec![],
+        }
+    }
+
     #[test]
     fn upgrades_naked_put_to_cash_secured_put_when_cash_is_available() {
         let strategies = vec![naked_put_strategy("TSLA_P350", "TSLA", 350.0)];
@@ -557,6 +595,28 @@ mod tests {
         assert_eq!(evaluated[0].kind, StrategyKind::CoveredCall);
         assert_eq!(evaluated[0].margin.margin_required, 0.0);
         assert!((evaluated[0].max_loss.unwrap_or_default() - 39_750.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn calendar_spread_is_treated_as_defined_risk_debit_structure() {
+        let strategies = vec![calendar_put_strategy()];
+        let evaluated = evaluate_strategies(
+            &strategies,
+            &[],
+            &AccountContext {
+                trade_date_cash: Some(0.0),
+                settled_cash: Some(0.0),
+                option_buying_power: None,
+                stock_buying_power: None,
+                margin_loan: None,
+                short_market_value: None,
+                margin_enabled: true,
+            },
+        );
+
+        assert_eq!(evaluated[0].kind, StrategyKind::CalendarPutSpread);
+        assert_eq!(evaluated[0].margin.margin_required, 0.0);
+        assert!((evaluated[0].max_loss.unwrap_or_default() - 460.0).abs() < 0.01);
     }
 
     #[test]

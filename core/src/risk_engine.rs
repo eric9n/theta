@@ -32,9 +32,11 @@ pub fn identify_strategies(positions: &[Position]) -> Vec<IdentifiedStrategy> {
         identify_covered_calls(&underlying, &mut legs, &mut strategies);
         // 5. Straddle / Strangle
         identify_straddles_strangles(&underlying, &mut legs, &mut strategies);
-        // 6. Remaining single-leg options
+        // 6. Cross-expiry debit structures
+        identify_cross_expiry_spreads(&underlying, &mut legs, &mut strategies);
+        // 7. Remaining single-leg options
         identify_single_legs(&underlying, &mut legs, &mut strategies);
-        // 7. Remaining stock
+        // 8. Remaining stock
         identify_unmatched_stock(&underlying, &mut legs, &mut strategies);
     }
 
@@ -179,6 +181,104 @@ fn identify_iron_condors(
                 }
             }
         }
+    }
+
+    remove_consumed(legs, &consumed);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-expiry debit structures: calendar and diagonal spreads
+// ---------------------------------------------------------------------------
+
+fn identify_cross_expiry_spreads(
+    underlying: &str,
+    legs: &mut Vec<Position>,
+    out: &mut Vec<IdentifiedStrategy>,
+) {
+    let short_indices: Vec<usize> = legs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| (p.side == "put" || p.side == "call") && p.net_quantity < 0)
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut consumed = Vec::new();
+
+    for short_idx in short_indices {
+        if consumed.contains(&short_idx) {
+            continue;
+        }
+
+        let short = &legs[short_idx];
+        let Some(short_expiry) = short.expiry.as_deref() else {
+            continue;
+        };
+
+        let mut best_match: Option<(usize, StrategyKind, f64)> = None;
+
+        for (long_idx, long) in legs.iter().enumerate() {
+            if long_idx == short_idx || consumed.contains(&long_idx) {
+                continue;
+            }
+            if long.side != short.side || long.net_quantity <= 0 {
+                continue;
+            }
+            if short.net_quantity.unsigned_abs() != long.net_quantity.unsigned_abs() {
+                continue;
+            }
+
+            let Some(long_expiry) = long.expiry.as_deref() else {
+                continue;
+            };
+            if long_expiry <= short_expiry {
+                continue;
+            }
+
+            let Some(kind) = classify_cross_expiry_spread(short, long) else {
+                continue;
+            };
+
+            let strike_gap = (short.strike.unwrap_or(0.0) - long.strike.unwrap_or(0.0)).abs();
+            let priority = if strike_gap < 0.01 { 0.0 } else { 1.0 };
+            let sort_key = priority * 10_000.0 + strike_gap;
+
+            match best_match {
+                Some((_, _, best_key)) if best_key <= sort_key => {}
+                _ => best_match = Some((long_idx, kind, sort_key)),
+            }
+        }
+
+        let Some((long_idx, kind, _)) = best_match else {
+            continue;
+        };
+
+        let short = &legs[short_idx];
+        let long = &legs[long_idx];
+        let net_debit = spread_debit_total(short, long);
+        let method = match kind {
+            StrategyKind::CalendarCallSpread | StrategyKind::CalendarPutSpread => {
+                format!("calendar spread max loss equals net debit ({net_debit:.2})")
+            }
+            StrategyKind::DiagonalCallSpread | StrategyKind::DiagonalPutSpread => {
+                format!("diagonal spread max loss equals net debit ({net_debit:.2})")
+            }
+            _ => unreachable!("cross-expiry matcher only emits calendar/diagonal kinds"),
+        };
+
+        out.push(IdentifiedStrategy {
+            kind,
+            underlying: underlying.to_string(),
+            legs: vec![pos_to_leg(short), pos_to_leg(long)],
+            margin: StrategyMargin {
+                margin_required: 0.0,
+                method,
+            },
+            max_profit: None,
+            max_loss: Some(net_debit),
+            breakeven: vec![],
+        });
+
+        consumed.extend([short_idx, long_idx]);
     }
 
     remove_consumed(legs, &consumed);
@@ -630,6 +730,26 @@ fn identify_unmatched_stock(
     remove_consumed(legs, &consumed);
 }
 
+fn classify_cross_expiry_spread(short: &Position, long: &Position) -> Option<StrategyKind> {
+    let short_strike = short.strike?;
+    let long_strike = long.strike?;
+    let same_strike = (short_strike - long_strike).abs() < 0.01;
+
+    if same_strike {
+        return match short.side.as_str() {
+            "call" => Some(StrategyKind::CalendarCallSpread),
+            "put" => Some(StrategyKind::CalendarPutSpread),
+            _ => None,
+        };
+    }
+
+    match short.side.as_str() {
+        "call" if long_strike < short_strike => Some(StrategyKind::DiagonalCallSpread),
+        "put" if long_strike > short_strike => Some(StrategyKind::DiagonalPutSpread),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Margin calculation — Firstrade / Apex rules
 // ---------------------------------------------------------------------------
@@ -911,6 +1031,68 @@ mod tests {
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].kind, StrategyKind::NakedPut);
         assert!((strategies[0].margin.margin_required - 15000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn identifies_calendar_put_spread_from_matching_strikes() {
+        let positions = vec![
+            option_pos(
+                "TSLA_P385_NEAR",
+                "TSLA",
+                "put",
+                385.0,
+                "2026-03-13",
+                -1,
+                5.94,
+            ),
+            option_pos(
+                "TSLA_P385_FAR",
+                "TSLA",
+                "put",
+                385.0,
+                "2026-03-27",
+                1,
+                10.54,
+            ),
+        ];
+
+        let strategies = identify_strategies(&positions);
+
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].kind, StrategyKind::CalendarPutSpread);
+        assert_eq!(strategies[0].legs.len(), 2);
+        assert!((strategies[0].max_loss.unwrap_or_default() - 460.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn identifies_diagonal_call_spread_from_cross_expiry_pair() {
+        let positions = vec![
+            option_pos(
+                "TSLA_C450_NEAR",
+                "TSLA",
+                "call",
+                450.0,
+                "2026-04-10",
+                -1,
+                7.49,
+            ),
+            option_pos(
+                "TSLA_C430_FAR",
+                "TSLA",
+                "call",
+                430.0,
+                "2026-05-15",
+                1,
+                23.79,
+            ),
+        ];
+
+        let strategies = identify_strategies(&positions);
+
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].kind, StrategyKind::DiagonalCallSpread);
+        assert_eq!(strategies[0].legs.len(), 2);
+        assert!((strategies[0].max_loss.unwrap_or_default() - 1_630.0).abs() < 0.01);
     }
 
     #[test]
