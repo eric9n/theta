@@ -128,6 +128,20 @@ fn theta_portfolio_account_monitor_history_help_works() {
 }
 
 #[test]
+fn theta_portfolio_trade_tag_help_works() {
+    let mut cmd = theta_cmd();
+    cmd.args(["portfolio", "trade", "tag", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--strategy-group")
+                .and(predicate::str::contains("--intent-kind"))
+                .and(predicate::str::contains("--clear-strategy-group"))
+                .and(predicate::str::contains("--clear-intent-kind")),
+        );
+}
+
+#[test]
 fn theta_signals_history_on_empty_db_succeeds() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("signals.db");

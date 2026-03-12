@@ -415,6 +415,8 @@ mod tests {
             price: 100.0,
             commission: 0.0,
             notes: String::new(),
+            strategy_group: None,
+            intent_kind: None,
             account_id: "firstrade".to_string(),
         };
 
@@ -440,6 +442,8 @@ mod tests {
             price: 10_000.0,
             commission: 0.0,
             notes: String::new(),
+            strategy_group: None,
+            intent_kind: None,
             account_id: "firstrade".to_string(),
         };
         let short_put_sale = Trade {
@@ -455,6 +459,8 @@ mod tests {
             price: 5.0,
             commission: 1.25,
             notes: String::new(),
+            strategy_group: None,
+            intent_kind: None,
             account_id: "firstrade".to_string(),
         };
 

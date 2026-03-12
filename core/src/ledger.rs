@@ -30,6 +30,8 @@ pub struct Trade {
     /// Commission / fees
     pub commission: f64,
     pub notes: String,
+    pub strategy_group: Option<String>,
+    pub intent_kind: Option<String>,
     pub account_id: String,
 }
 
@@ -51,6 +53,13 @@ pub struct Position {
     pub avg_cost: f64,
     /// Total cost basis (absolute value)
     pub total_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyGroup {
+    pub group_id: String,
+    pub intent_kind: Option<String>,
+    pub positions: Vec<Position>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +211,8 @@ impl Ledger {
                 price       REAL    NOT NULL,
                 commission  REAL    NOT NULL DEFAULT 0,
                 notes       TEXT    NOT NULL DEFAULT '',
+                strategy_group TEXT,
+                intent_kind TEXT,
                 account_id  TEXT    NOT NULL DEFAULT 'firstrade'
             );
 
@@ -263,6 +274,7 @@ impl Ledger {
             CREATE INDEX IF NOT EXISTS idx_account_monitor_snapshots_account
                 ON account_monitor_snapshots(account_id, captured_at);",
         )?;
+        self.ensure_trades_columns()?;
         self.ensure_account_snapshots_columns()?;
         self.ensure_account_monitor_snapshot_columns()?;
         Ok(())
@@ -306,9 +318,45 @@ impl Ledger {
         notes: &str,
         account_id: &str,
     ) -> Result<i64> {
-        self.record_trade_internal(
+        self.record_trade_with_group(
             trade_date, symbol, underlying, side, strike, expiry, action, quantity, price,
-            commission, notes, account_id, false,
+            commission, notes, None, None, account_id,
+        )
+    }
+
+    pub fn record_trade_with_group(
+        &self,
+        trade_date: &str,
+        symbol: &str,
+        underlying: &str,
+        side: &str,
+        strike: Option<f64>,
+        expiry: Option<&str>,
+        action: &str,
+        quantity: i64,
+        price: f64,
+        commission: f64,
+        notes: &str,
+        strategy_group: Option<&str>,
+        intent_kind: Option<&str>,
+        account_id: &str,
+    ) -> Result<i64> {
+        self.record_trade_internal(
+            trade_date,
+            symbol,
+            underlying,
+            side,
+            strike,
+            expiry,
+            action,
+            quantity,
+            price,
+            commission,
+            notes,
+            strategy_group,
+            intent_kind,
+            account_id,
+            false,
         )
     }
 
@@ -327,9 +375,45 @@ impl Ledger {
         notes: &str,
         account_id: &str,
     ) -> Result<i64> {
-        self.record_trade_internal(
+        self.record_adjustment_trade_with_group(
             trade_date, symbol, underlying, side, strike, expiry, action, quantity, price,
-            commission, notes, account_id, true,
+            commission, notes, None, None, account_id,
+        )
+    }
+
+    pub fn record_adjustment_trade_with_group(
+        &self,
+        trade_date: &str,
+        symbol: &str,
+        underlying: &str,
+        side: &str,
+        strike: Option<f64>,
+        expiry: Option<&str>,
+        action: &str,
+        quantity: i64,
+        price: f64,
+        commission: f64,
+        notes: &str,
+        strategy_group: Option<&str>,
+        intent_kind: Option<&str>,
+        account_id: &str,
+    ) -> Result<i64> {
+        self.record_trade_internal(
+            trade_date,
+            symbol,
+            underlying,
+            side,
+            strike,
+            expiry,
+            action,
+            quantity,
+            price,
+            commission,
+            notes,
+            strategy_group,
+            intent_kind,
+            account_id,
+            true,
         )
     }
 
@@ -346,6 +430,8 @@ impl Ledger {
         price: f64,
         commission: f64,
         notes: &str,
+        strategy_group: Option<&str>,
+        intent_kind: Option<&str>,
         account_id: &str,
         allow_zero_price: bool,
     ) -> Result<i64> {
@@ -365,10 +451,15 @@ impl Ledger {
         }
         ensure!(commission >= 0.0, "commission must be non-negative");
 
+        let strategy_group = strategy_group
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let intent_kind = intent_kind.map(str::trim).filter(|value| !value.is_empty());
+
         self.conn.execute(
-            "INSERT INTO trades (trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id],
+            "INSERT INTO trades (trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, strategy_group, intent_kind, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, strategy_group, intent_kind, account_id],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -378,6 +469,45 @@ impl Ledger {
         let affected = self
             .conn
             .execute("DELETE FROM trades WHERE id = ?1", params![id])?;
+        Ok(affected > 0)
+    }
+
+    pub fn update_trade_intent_metadata(
+        &self,
+        id: i64,
+        strategy_group: Option<Option<&str>>,
+        intent_kind: Option<Option<&str>>,
+    ) -> Result<bool> {
+        let mut updates = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(strategy_group) = strategy_group {
+            updates.push("strategy_group = ?");
+            let normalized = strategy_group.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then_some(trimmed.to_string())
+            });
+            params_vec.push(Box::new(normalized));
+        }
+
+        if let Some(intent_kind) = intent_kind {
+            updates.push("intent_kind = ?");
+            let normalized = intent_kind.and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then_some(trimmed.to_string())
+            });
+            params_vec.push(Box::new(normalized));
+        }
+
+        if updates.is_empty() {
+            return Ok(false);
+        }
+
+        let sql = format!("UPDATE trades SET {} WHERE id = ?", updates.join(", "));
+        params_vec.push(Box::new(id));
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let affected = self.conn.execute(&sql, params_refs.as_slice())?;
         Ok(affected > 0)
     }
 
@@ -478,7 +608,7 @@ impl Ledger {
     /// List trades with optional filters.
     pub fn list_trades(&self, filter: &TradeFilter) -> Result<Vec<Trade>> {
         let mut sql = String::from(
-            "SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, account_id FROM trades WHERE 1=1",
+            "SELECT id, trade_date, symbol, underlying, side, strike, expiry, action, quantity, price, commission, notes, strategy_group, intent_kind, account_id FROM trades WHERE 1=1",
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -522,7 +652,9 @@ impl Ledger {
                 price: row.get(9)?,
                 commission: row.get(10)?,
                 notes: row.get(11)?,
-                account_id: row.get(12)?,
+                strategy_group: row.get(12)?,
+                intent_kind: row.get(13)?,
+                account_id: row.get(14)?,
             })
         })?;
 
@@ -531,6 +663,195 @@ impl Ledger {
             trades.push(row?);
         }
         Ok(trades)
+    }
+
+    pub fn calculate_strategy_groups(
+        &self,
+        account_id: &str,
+        underlying_filter: Option<&str>,
+    ) -> Result<Vec<StrategyGroup>> {
+        let trades = self.list_trades(&TradeFilter {
+            underlying: underlying_filter.map(String::from),
+            account_id: Some(account_id.to_string()),
+            ..Default::default()
+        })?;
+
+        use std::collections::HashMap;
+
+        #[derive(Hash, Eq, PartialEq, Clone)]
+        struct GroupPosKey {
+            group_id: String,
+            symbol: String,
+            underlying: String,
+            side: String,
+            strike_cents: i64,
+            expiry: Option<String>,
+        }
+
+        let mut accum: HashMap<GroupPosKey, PosAccum> = HashMap::new();
+
+        for t in &trades {
+            let Some(group_id) = t
+                .strategy_group
+                .as_deref()
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+
+            let key = GroupPosKey {
+                group_id,
+                symbol: t.symbol.clone(),
+                underlying: t.underlying.clone(),
+                side: t.side.clone(),
+                strike_cents: t.strike.map(|s| (s * 100.0) as i64).unwrap_or(0),
+                expiry: t.expiry.clone(),
+            };
+
+            let entry = accum.entry(key).or_insert(PosAccum {
+                net_quantity: 0,
+                open_cost_total: 0.0,
+            });
+
+            let signed_trade_quantity = match t.action.as_str() {
+                "buy" => t.quantity,
+                "sell" => -t.quantity,
+                _ => continue,
+            };
+            let trade_quantity_abs = t.quantity;
+            let trade_direction = signed_trade_quantity.signum();
+
+            if entry.net_quantity == 0 || entry.net_quantity.signum() == trade_direction {
+                apply_open_trade(
+                    entry,
+                    trade_direction,
+                    trade_quantity_abs,
+                    t.price,
+                    t.commission,
+                );
+                continue;
+            }
+
+            let closing_quantity = trade_quantity_abs.min(entry.net_quantity.unsigned_abs() as i64);
+            if closing_quantity > 0 {
+                let avg_open_cost =
+                    entry.open_cost_total / entry.net_quantity.unsigned_abs() as f64;
+                entry.net_quantity += trade_direction * closing_quantity;
+                entry.open_cost_total -= avg_open_cost * closing_quantity as f64;
+                if entry.net_quantity == 0 {
+                    entry.open_cost_total = 0.0;
+                }
+            }
+
+            let opening_remainder = trade_quantity_abs - closing_quantity;
+            if opening_remainder > 0 {
+                let opening_commission =
+                    t.commission * (opening_remainder as f64 / trade_quantity_abs as f64);
+                apply_open_trade(
+                    entry,
+                    trade_direction,
+                    opening_remainder,
+                    t.price,
+                    opening_commission,
+                );
+            }
+        }
+
+        let today = time::OffsetDateTime::now_utc().date().to_string();
+        let mut group_intents: HashMap<String, Option<String>> = HashMap::new();
+        let mut grouped: HashMap<String, Vec<Position>> = HashMap::new();
+
+        for (k, v) in accum {
+            if v.net_quantity == 0 {
+                continue;
+            }
+            if let Some(ref exp) = k.expiry
+                && exp < &today
+            {
+                continue;
+            }
+
+            let avg_cost = if v.net_quantity != 0 {
+                v.open_cost_total / v.net_quantity.unsigned_abs() as f64
+            } else {
+                0.0
+            };
+
+            grouped.entry(k.group_id).or_default().push(Position {
+                symbol: k.symbol,
+                underlying: k.underlying,
+                side: k.side,
+                strike: if k.strike_cents != 0 {
+                    Some(k.strike_cents as f64 / 100.0)
+                } else {
+                    None
+                },
+                expiry: k.expiry,
+                net_quantity: v.net_quantity,
+                avg_cost,
+                total_cost: v.open_cost_total.abs(),
+            });
+        }
+
+        for trade in &trades {
+            let Some(group_id) = trade
+                .strategy_group
+                .as_deref()
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            if !grouped.contains_key(&group_id) {
+                continue;
+            }
+            let Some(intent_kind) = trade
+                .intent_kind
+                .as_deref()
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+
+            group_intents
+                .entry(group_id)
+                .and_modify(|existing| {
+                    if existing.as_deref() != Some(intent_kind.as_str()) {
+                        *existing = None;
+                    }
+                })
+                .or_insert_with(|| Some(intent_kind));
+        }
+
+        let mut groups: Vec<StrategyGroup> = grouped
+            .into_iter()
+            .map(|(group_id, mut positions)| {
+                positions.sort_by(|a, b| {
+                    a.underlying
+                        .cmp(&b.underlying)
+                        .then(a.expiry.cmp(&b.expiry))
+                        .then(a.side.cmp(&b.side))
+                        .then(
+                            a.strike
+                                .partial_cmp(&b.strike)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                });
+                StrategyGroup {
+                    intent_kind: group_intents.get(&group_id).cloned().flatten(),
+                    group_id,
+                    positions,
+                }
+            })
+            .collect();
+
+        groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        Ok(groups)
     }
 
     /// Compute current positions by aggregating all trades.
@@ -900,6 +1221,24 @@ impl Ledger {
         Ok(())
     }
 
+    fn ensure_trades_columns(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(trades)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if !columns.iter().any(|column| column == "strategy_group") {
+            self.conn
+                .execute("ALTER TABLE trades ADD COLUMN strategy_group TEXT", [])?;
+        }
+        if !columns.iter().any(|column| column == "intent_kind") {
+            self.conn
+                .execute("ALTER TABLE trades ADD COLUMN intent_kind TEXT", [])?;
+        }
+
+        Ok(())
+    }
+
     fn latest_trade_id(&self, account_id: &str) -> Result<Option<i64>> {
         let mut stmt = self
             .conn
@@ -979,6 +1318,152 @@ mod tests {
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].symbol, "TSLA260320C00400000");
         assert_eq!(trades[0].quantity, 2);
+        assert_eq!(trades[0].strategy_group, None);
+        assert_eq!(trades[0].intent_kind, None);
+    }
+
+    #[test]
+    fn calculate_strategy_groups_tracks_open_legs_by_group() {
+        let ledger = in_memory_ledger();
+
+        ledger
+            .record_trade_with_group(
+                "2026-03-11",
+                "TSLA260417C440000",
+                "TSLA",
+                "call",
+                Some(440.0),
+                Some("2026-04-17"),
+                "sell",
+                1,
+                12.45,
+                0.0,
+                "",
+                Some("diag-roll-1"),
+                Some("diagonal_call_spread"),
+                "firstrade",
+            )
+            .unwrap();
+        ledger
+            .record_trade_with_group(
+                "2026-03-11",
+                "TSLA260618C450000",
+                "TSLA",
+                "call",
+                Some(450.0),
+                Some("2026-06-18"),
+                "buy",
+                1,
+                26.52,
+                0.0,
+                "",
+                Some("diag-roll-1"),
+                Some("diagonal_call_spread"),
+                "firstrade",
+            )
+            .unwrap();
+
+        let groups = ledger
+            .calculate_strategy_groups("firstrade", Some("TSLA"))
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "diag-roll-1");
+        assert_eq!(
+            groups[0].intent_kind.as_deref(),
+            Some("diagonal_call_spread")
+        );
+        assert_eq!(groups[0].positions.len(), 2);
+        assert_eq!(groups[0].positions[0].symbol, "TSLA260417C440000");
+        assert_eq!(groups[0].positions[0].net_quantity, -1);
+        assert_eq!(groups[0].positions[1].symbol, "TSLA260618C450000");
+        assert_eq!(groups[0].positions[1].net_quantity, 1);
+    }
+
+    #[test]
+    fn create_tables_migrates_legacy_trades_schema_with_strategy_group() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE trades (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date  TEXT    NOT NULL,
+                symbol      TEXT    NOT NULL,
+                underlying  TEXT    NOT NULL,
+                side        TEXT    NOT NULL,
+                strike      REAL,
+                expiry      TEXT,
+                action      TEXT    NOT NULL,
+                quantity    INTEGER NOT NULL,
+                price       REAL    NOT NULL,
+                commission  REAL    NOT NULL DEFAULT 0,
+                notes       TEXT    NOT NULL DEFAULT '',
+                account_id  TEXT    NOT NULL DEFAULT 'firstrade'
+            );",
+        )
+        .unwrap();
+
+        let ledger = Ledger { conn };
+        ledger.create_tables().unwrap();
+
+        let columns: Vec<String> = ledger
+            .conn
+            .prepare("PRAGMA table_info(trades)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(columns.iter().any(|column| column == "strategy_group"));
+        assert!(columns.iter().any(|column| column == "intent_kind"));
+    }
+
+    #[test]
+    fn update_trade_intent_metadata_sets_and_clears_fields() {
+        let ledger = in_memory_ledger();
+        let id = ledger
+            .record_trade(
+                "2026-03-01",
+                "TSLA260320C00400000",
+                "TSLA",
+                "call",
+                Some(400.0),
+                Some("2026-03-20"),
+                "sell",
+                1,
+                5.30,
+                0.0,
+                "opening short call",
+                "firstrade",
+            )
+            .unwrap();
+
+        assert!(
+            ledger
+                .update_trade_intent_metadata(
+                    id,
+                    Some(Some("diag-roll-1")),
+                    Some(Some("diagonal_call_spread"))
+                )
+                .unwrap()
+        );
+
+        let trades = ledger.list_trades(&TradeFilter::default()).unwrap();
+        assert_eq!(trades[0].strategy_group.as_deref(), Some("diag-roll-1"));
+        assert_eq!(
+            trades[0].intent_kind.as_deref(),
+            Some("diagonal_call_spread")
+        );
+
+        assert!(
+            ledger
+                .update_trade_intent_metadata(id, Some(None), Some(None))
+                .unwrap()
+        );
+
+        let trades = ledger.list_trades(&TradeFilter::default()).unwrap();
+        assert_eq!(trades[0].strategy_group, None);
+        assert_eq!(trades[0].intent_kind, None);
     }
 
     #[test]

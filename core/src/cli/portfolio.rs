@@ -1,7 +1,8 @@
 use crate::accounting_service::AccountingService;
 use crate::analysis_service::ThetaAnalysisService;
 use crate::ledger::{
-    AccountMonitorSnapshot, AccountSnapshot, AccountSnapshotInput, Ledger, TradeFilter,
+    AccountMonitorSnapshot, AccountSnapshot, AccountSnapshotInput, Ledger, StrategyGroup,
+    TradeFilter,
 };
 use crate::margin_engine::{self, AccountContext};
 use crate::portfolio_service;
@@ -13,6 +14,13 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use time::{Date, format_description::well_known::Rfc3339};
+
+#[derive(Debug, Clone, Serialize)]
+struct IntentGroupView {
+    group_id: String,
+    intent_kind: Option<String>,
+    positions: Vec<crate::ledger::Position>,
+}
 
 #[derive(Args, Debug)]
 #[command(name = "portfolio")]
@@ -168,6 +176,13 @@ enum TradeAction {
         date: Option<String>,
         #[arg(long, default_value = "", help = "Notes")]
         notes: String,
+        #[arg(long, help = "Optional strategy intent group id for multi-leg trades")]
+        strategy_group: Option<String>,
+        #[arg(
+            long,
+            help = "Optional explicit intent kind label for the strategy group"
+        )]
+        intent_kind: Option<String>,
     },
     /// Record a new sell trade
     Sell {
@@ -191,6 +206,13 @@ enum TradeAction {
         date: Option<String>,
         #[arg(long, default_value = "", help = "Notes")]
         notes: String,
+        #[arg(long, help = "Optional strategy intent group id for multi-leg trades")]
+        strategy_group: Option<String>,
+        #[arg(
+            long,
+            help = "Optional explicit intent kind label for the strategy group"
+        )]
+        intent_kind: Option<String>,
     },
     /// Record a long option exercise (closes the option and books the stock delivery)
     Exercise {
@@ -295,6 +317,19 @@ enum TradeAction {
     Delete {
         #[arg(help = "Trade ID to delete")]
         id: i64,
+    },
+    /// Update intent metadata on an existing trade
+    Tag {
+        #[arg(help = "Trade ID to update")]
+        id: i64,
+        #[arg(long, help = "Set strategy intent group id")]
+        strategy_group: Option<String>,
+        #[arg(long, help = "Set explicit intent kind label")]
+        intent_kind: Option<String>,
+        #[arg(long, help = "Clear strategy intent group")]
+        clear_strategy_group: bool,
+        #[arg(long, help = "Clear explicit intent kind label")]
+        clear_intent_kind: bool,
     },
     /// Record a cash deposit
     Deposit {
@@ -445,6 +480,8 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
             commission,
             date,
             notes,
+            strategy_group,
+            intent_kind,
         } => {
             validate_option_fields(&side, strike, expiry.as_deref())?;
             let trade_date = date.unwrap_or_else(today);
@@ -453,7 +490,7 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                     .await;
 
             ledger.with_transaction(|tx| {
-                let id = tx.record_trade(
+                let id = tx.record_trade_with_group(
                     &trade_date,
                     &symbol,
                     &underlying,
@@ -465,6 +502,8 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                     price,
                     commission,
                     &notes,
+                    strategy_group.as_deref(),
+                    intent_kind.as_deref(),
                     account_id,
                 )?;
                 println!("Recorded BUY trade #{id}: {quantity} \u{00d7} {symbol} @ {price}");
@@ -484,6 +523,8 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
             commission,
             date,
             notes,
+            strategy_group,
+            intent_kind,
         } => {
             validate_option_fields(&side, strike, expiry.as_deref())?;
             let trade_date = date.unwrap_or_else(today);
@@ -492,7 +533,7 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                     .await;
 
             ledger.with_transaction(|tx| {
-                let id = tx.record_trade(
+                let id = tx.record_trade_with_group(
                     &trade_date,
                     &symbol,
                     &underlying,
@@ -504,6 +545,8 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                     price,
                     commission,
                     &notes,
+                    strategy_group.as_deref(),
+                    intent_kind.as_deref(),
                     account_id,
                 )?;
                 println!("Recorded SELL trade #{id}: {quantity} \u{00d7} {symbol} @ {price}");
@@ -746,13 +789,23 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                 println!("No trades found.");
             } else {
                 println!(
-                    "{:>5}  {:>10}  {:>6}  {:<30}  {:<6}  {:>8}  {:>10}  {:>8}  {:>10}",
-                    "ID", "DATE", "ACTION", "SYMBOL", "SIDE", "QTY", "PRICE", "STRIKE", "EXPIRY"
+                    "{:>5}  {:>10}  {:>6}  {:<30}  {:<6}  {:>8}  {:>10}  {:>8}  {:>10}  {:<16}  {:<20}",
+                    "ID",
+                    "DATE",
+                    "ACTION",
+                    "SYMBOL",
+                    "SIDE",
+                    "QTY",
+                    "PRICE",
+                    "STRIKE",
+                    "EXPIRY",
+                    "GROUP",
+                    "INTENT"
                 );
-                println!("{}", "-".repeat(105));
+                println!("{}", "-".repeat(145));
                 for t in &trades {
                     println!(
-                        "{:>5}  {:>10}  {:>6}  {:<30}  {:<6}  {:>8}  {:>10.2}  {:>8}  {:>10}",
+                        "{:>5}  {:>10}  {:>6}  {:<30}  {:<6}  {:>8}  {:>10.2}  {:>8}  {:>10}  {:<16}  {:<20}",
                         t.id,
                         t.trade_date,
                         t.action.to_uppercase(),
@@ -762,6 +815,8 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
                         t.price,
                         t.strike.map(|s| format!("{s:.2}")).unwrap_or_default(),
                         t.expiry.as_deref().unwrap_or(""),
+                        t.strategy_group.as_deref().unwrap_or(""),
+                        t.intent_kind.as_deref().unwrap_or(""),
                     );
                 }
                 println!("\nTotal: {} trades", trades.len());
@@ -771,6 +826,37 @@ async fn handle_trade(ledger: &Ledger, account_id: &str, action: TradeAction) ->
         TradeAction::Delete { id } => {
             if ledger.delete_trade(id)? {
                 println!("Deleted trade #{id}");
+            } else {
+                println!("Trade #{id} not found");
+            }
+            Ok(())
+        }
+        TradeAction::Tag {
+            id,
+            strategy_group,
+            intent_kind,
+            clear_strategy_group,
+            clear_intent_kind,
+        } => {
+            let strategy_group_update = if clear_strategy_group {
+                Some(None)
+            } else {
+                strategy_group.as_deref().map(Some)
+            };
+            let intent_kind_update = if clear_intent_kind {
+                Some(None)
+            } else {
+                intent_kind.as_deref().map(Some)
+            };
+
+            if strategy_group_update.is_none() && intent_kind_update.is_none() {
+                bail!(
+                    "provide at least one of --strategy-group, --intent-kind, --clear-strategy-group, or --clear-intent-kind"
+                );
+            }
+
+            if ledger.update_trade_intent_metadata(id, strategy_group_update, intent_kind_update)? {
+                println!("Updated trade #{id} intent metadata");
             } else {
                 println!("Trade #{id} not found");
             }
@@ -1597,6 +1683,87 @@ fn format_money(value: f64) -> String {
     format!("{value:.2}")
 }
 
+fn build_intent_group_views(groups: &[StrategyGroup]) -> Vec<IntentGroupView> {
+    groups
+        .iter()
+        .map(|group| {
+            let intent_kind = if let Some(kind) = group
+                .intent_kind
+                .as_deref()
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+            {
+                Some(kind.to_string())
+            } else {
+                let identified = risk_engine::identify_strategies(&group.positions);
+                if identified.len() == 1
+                    && identified[0].kind != crate::risk_domain::StrategyKind::Unmatched
+                    && identified[0].legs.len() == group.positions.len()
+                {
+                    Some(identified[0].kind.to_string())
+                } else {
+                    None
+                }
+            };
+
+            IntentGroupView {
+                group_id: group.group_id.clone(),
+                intent_kind,
+                positions: group.positions.clone(),
+            }
+        })
+        .collect()
+}
+
+fn render_intent_groups(groups: &[IntentGroupView]) {
+    if groups.is_empty() {
+        println!("No intent strategy groups.");
+        return;
+    }
+
+    for (i, group) in groups.iter().enumerate() {
+        let mut underlyings: Vec<&str> = group
+            .positions
+            .iter()
+            .map(|p| p.underlying.as_str())
+            .collect();
+        underlyings.sort_unstable();
+        underlyings.dedup();
+        println!(
+            "Intent #{}: {} [{}]{}",
+            i + 1,
+            group.group_id,
+            underlyings.join(", "),
+            group
+                .intent_kind
+                .as_deref()
+                .map(|kind| format!(" -> {}", kind))
+                .unwrap_or_default()
+        );
+        for leg in &group.positions {
+            let dir = if leg.net_quantity > 0 {
+                "LONG"
+            } else {
+                "SHORT"
+            };
+            println!(
+                "  {} {} {} × {} @ {:.2}{}{}",
+                dir,
+                leg.side,
+                leg.net_quantity.abs(),
+                leg.symbol,
+                leg.avg_cost,
+                leg.strike.map(|s| format!(" K={s:.2}")).unwrap_or_default(),
+                leg.expiry
+                    .as_deref()
+                    .map(|expiry| format!(" EXP={expiry}"))
+                    .unwrap_or_default(),
+            );
+        }
+        println!();
+    }
+}
+
 async fn handle_strategies(
     ledger: &Ledger,
     account_id: &str,
@@ -1609,6 +1776,9 @@ async fn handle_strategies(
         return Ok(());
     }
 
+    let intent_groups = build_intent_group_views(
+        &ledger.calculate_strategy_groups(account_id, underlying.as_deref())?,
+    );
     let strategies = risk_engine::identify_strategies(&positions);
     let account_snapshot = ledger.latest_account_snapshot(account_id)?.ok_or_else(|| {
         anyhow::anyhow!("no account snapshot found; run `portfolio account set ...` first")
@@ -1645,7 +1815,9 @@ async fn handle_strategies(
     if json {
         let payload = serde_json::json!({
             "account_snapshot": account_snapshot,
-            "strategies": evaluated_strategies,
+            "intent_groups": &intent_groups,
+            "risk_strategies": &evaluated_strategies,
+            "strategies": &evaluated_strategies,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -1662,11 +1834,15 @@ async fn handle_strategies(
             .unwrap_or_else(|| "-".to_string())
     );
 
+    println!("\nIntent-linked groups:");
+    render_intent_groups(&intent_groups);
+
     if evaluated_strategies.is_empty() {
-        println!("No strategies identified.");
+        println!("No risk-netted strategies identified.");
         return Ok(());
     }
 
+    println!("Risk-netted strategies:");
     for (i, s) in evaluated_strategies.iter().enumerate() {
         println!("Strategy #{}: {} ({})", i + 1, s.kind, s.underlying);
         for leg in &s.legs {
@@ -1751,6 +1927,9 @@ async fn handle_report(
         None
     };
 
+    let intent_groups = build_intent_group_views(
+        &ledger.calculate_strategy_groups(account_id, underlying.as_deref())?,
+    );
     let strategies = risk_engine::identify_strategies(&positions);
     let margin_positions: Vec<EnrichedPosition> = enriched.clone().unwrap_or_else(|| {
         positions
@@ -1786,7 +1965,9 @@ async fn handle_report(
     if json {
         let report = serde_json::json!({
             "positions": enriched.as_ref().map(|e| serde_json::to_value(e).ok()).unwrap_or_else(|| serde_json::to_value(&positions).ok()),
-            "strategies": evaluated_strategies,
+            "intent_groups": &intent_groups,
+            "risk_strategies": &evaluated_strategies,
+            "strategies": &evaluated_strategies,
             "account_snapshot": account_snapshot,
             "portfolio_greeks": portfolio_greeks,
             "total_margin_required": total_margin,
@@ -1919,9 +2100,12 @@ async fn handle_report(
     }
 
     // -- Strategies --
-    println!("\n\u{2550}\u{2550}\u{2550} STRATEGIES \u{2550}\u{2550}\u{2550}");
+    println!("\n\u{2550}\u{2550}\u{2550} INTENT GROUPS \u{2550}\u{2550}\u{2550}");
+    render_intent_groups(&intent_groups);
+
+    println!("\n\u{2550}\u{2550}\u{2550} RISK-NETTED STRATEGIES \u{2550}\u{2550}\u{2550}");
     if evaluated_strategies.is_empty() {
-        println!("No strategies identified.");
+        println!("No risk-netted strategies identified.");
     } else {
         for (i, s) in evaluated_strategies.iter().enumerate() {
             println!("{}. {} ({})", i + 1, s.kind, s.underlying);
@@ -1957,7 +2141,8 @@ async fn handle_report(
     // -- Summary --
     println!("\n\u{2550}\u{2550}\u{2550} SUMMARY \u{2550}\u{2550}\u{2550}");
     println!("Positions       : {}", positions.len());
-    println!("Strategies      : {}", evaluated_strategies.len());
+    println!("Intent Groups   : {}", intent_groups.len());
+    println!("Risk Strategies : {}", evaluated_strategies.len());
     println!("Total margin    : ${:.2}", total_margin);
     if let Some(ref ep) = enriched {
         let total_pnl: f64 = ep.iter().map(|p| p.unrealized_pnl).sum();
@@ -2188,11 +2373,11 @@ fn summarize_account_market_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_margin_loan, estimate_option_buying_power, estimate_stock_buying_power,
-        load_positions_for_enrichment, metric_label, snapshot_uses_estimated_overview,
-        summarize_account_market_values,
+        build_intent_group_views, estimate_margin_loan, estimate_option_buying_power,
+        estimate_stock_buying_power, load_positions_for_enrichment, metric_label,
+        snapshot_uses_estimated_overview, summarize_account_market_values,
     };
-    use crate::ledger::{AccountSnapshot, Ledger, Position};
+    use crate::ledger::{AccountSnapshot, Ledger, Position, StrategyGroup};
     use crate::risk_domain::EnrichedPosition;
     use tempfile::tempdir;
 
@@ -2298,6 +2483,82 @@ mod tests {
                 .any(|position| position.underlying == "QQQ")
         );
         assert!(positions.iter().all(|position| position.net_quantity == 0));
+    }
+
+    #[test]
+    fn build_intent_group_views_infers_exact_strategy_kind() {
+        let groups = vec![StrategyGroup {
+            group_id: "diag-roll-1".to_string(),
+            intent_kind: None,
+            positions: vec![
+                Position {
+                    symbol: "TSLA260417C440000".to_string(),
+                    underlying: "TSLA".to_string(),
+                    side: "call".to_string(),
+                    strike: Some(440.0),
+                    expiry: Some("2026-04-17".to_string()),
+                    net_quantity: -1,
+                    avg_cost: 12.45,
+                    total_cost: 12.45,
+                },
+                Position {
+                    symbol: "TSLA260515C430000".to_string(),
+                    underlying: "TSLA".to_string(),
+                    side: "call".to_string(),
+                    strike: Some(430.0),
+                    expiry: Some("2026-05-15".to_string()),
+                    net_quantity: 1,
+                    avg_cost: 23.79,
+                    total_cost: 23.79,
+                },
+            ],
+        }];
+
+        let views = build_intent_group_views(&groups);
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            views[0].intent_kind.as_deref(),
+            Some("Diagonal Call Spread")
+        );
+    }
+
+    #[test]
+    fn build_intent_group_views_prefers_explicit_intent_kind() {
+        let groups = vec![StrategyGroup {
+            group_id: "diag-roll-1".to_string(),
+            intent_kind: Some("manual_diagonal_roll".to_string()),
+            positions: vec![
+                Position {
+                    symbol: "TSLA260417C440000".to_string(),
+                    underlying: "TSLA".to_string(),
+                    side: "call".to_string(),
+                    strike: Some(440.0),
+                    expiry: Some("2026-04-17".to_string()),
+                    net_quantity: -1,
+                    avg_cost: 12.45,
+                    total_cost: 12.45,
+                },
+                Position {
+                    symbol: "TSLA260515C430000".to_string(),
+                    underlying: "TSLA".to_string(),
+                    side: "call".to_string(),
+                    strike: Some(430.0),
+                    expiry: Some("2026-05-15".to_string()),
+                    net_quantity: 1,
+                    avg_cost: 23.79,
+                    total_cost: 23.79,
+                },
+            ],
+        }];
+
+        let views = build_intent_group_views(&groups);
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            views[0].intent_kind.as_deref(),
+            Some("manual_diagonal_roll")
+        );
     }
 
     #[test]

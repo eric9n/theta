@@ -11,9 +11,9 @@ use crate::risk_domain::*;
 pub fn identify_strategies(positions: &[Position]) -> Vec<IdentifiedStrategy> {
     let mut strategies = Vec::new();
 
-    // Group by underlying
-    let mut by_underlying: std::collections::HashMap<String, Vec<Position>> =
-        std::collections::HashMap::new();
+    // Group by underlying deterministically so strategy output is stable across runs.
+    let mut by_underlying: std::collections::BTreeMap<String, Vec<Position>> =
+        std::collections::BTreeMap::new();
     for p in positions {
         by_underlying
             .entry(p.underlying.clone())
@@ -22,25 +22,68 @@ pub fn identify_strategies(positions: &[Position]) -> Vec<IdentifiedStrategy> {
     }
 
     for (underlying, mut legs) in by_underlying {
+        let mut underlying_strategies = Vec::new();
+
         // 1. Iron Condor (bear call spread + bull put spread)
-        identify_iron_condors(&underlying, &mut legs, &mut strategies);
+        identify_iron_condors(&underlying, &mut legs, &mut underlying_strategies);
         // 2. Butterfly
-        identify_butterflies(&underlying, &mut legs, &mut strategies);
+        identify_butterflies(&underlying, &mut legs, &mut underlying_strategies);
         // 3. Vertical spreads
-        identify_vertical_spreads(&underlying, &mut legs, &mut strategies);
+        identify_vertical_spreads(&underlying, &mut legs, &mut underlying_strategies);
         // 4. Covered Call (stock + short call)
-        identify_covered_calls(&underlying, &mut legs, &mut strategies);
+        identify_covered_calls(&underlying, &mut legs, &mut underlying_strategies);
         // 5. Straddle / Strangle
-        identify_straddles_strangles(&underlying, &mut legs, &mut strategies);
+        identify_straddles_strangles(&underlying, &mut legs, &mut underlying_strategies);
         // 6. Cross-expiry debit structures
-        identify_cross_expiry_spreads(&underlying, &mut legs, &mut strategies);
+        identify_cross_expiry_spreads(&underlying, &mut legs, &mut underlying_strategies);
         // 7. Remaining single-leg options
-        identify_single_legs(&underlying, &mut legs, &mut strategies);
+        identify_single_legs(&underlying, &mut legs, &mut underlying_strategies);
         // 8. Remaining stock
-        identify_unmatched_stock(&underlying, &mut legs, &mut strategies);
+        identify_unmatched_stock(&underlying, &mut legs, &mut underlying_strategies);
+
+        sort_identified_strategies(&mut underlying_strategies);
+        strategies.extend(underlying_strategies);
     }
 
     strategies
+}
+
+fn sort_identified_strategies(strategies: &mut [IdentifiedStrategy]) {
+    strategies.sort_by(|a, b| {
+        strategy_output_priority(&a.kind)
+            .cmp(&strategy_output_priority(&b.kind))
+            .then_with(|| a.underlying.cmp(&b.underlying))
+            .then_with(|| strategy_symbol_key(a).cmp(&strategy_symbol_key(b)))
+    });
+}
+
+fn strategy_symbol_key(strategy: &IdentifiedStrategy) -> Vec<String> {
+    let mut symbols: Vec<String> = strategy.legs.iter().map(|leg| leg.symbol.clone()).collect();
+    symbols.sort();
+    symbols
+}
+
+fn strategy_output_priority(kind: &StrategyKind) -> u8 {
+    match kind {
+        StrategyKind::IronCondor => 0,
+        StrategyKind::Butterfly => 1,
+        StrategyKind::BullPutSpread => 2,
+        StrategyKind::BearCallSpread => 3,
+        StrategyKind::BullCallSpread => 4,
+        StrategyKind::BearPutSpread => 5,
+        StrategyKind::CoveredCall => 6,
+        StrategyKind::Straddle => 7,
+        StrategyKind::Strangle => 8,
+        StrategyKind::CalendarCallSpread => 9,
+        StrategyKind::CalendarPutSpread => 10,
+        StrategyKind::DiagonalCallSpread => 11,
+        StrategyKind::DiagonalPutSpread => 12,
+        StrategyKind::LongCall => 13,
+        StrategyKind::LongPut => 14,
+        StrategyKind::CashSecuredPut => 15,
+        StrategyKind::NakedPut => 16,
+        StrategyKind::Unmatched => 17,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -52,8 +95,18 @@ fn identify_iron_condors(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
-    // Need: short call (lower) + long call (higher) + short put (higher) + long put (lower)
-    // All same expiry, same quantity magnitude
+    #[derive(Clone)]
+    struct IronCondorCandidate {
+        short_call_idx: usize,
+        long_call_idx: usize,
+        short_put_idx: usize,
+        long_put_idx: usize,
+        expiry: String,
+        max_side_risk: f64,
+        total_credit: f64,
+        symbol_key: [String; 4],
+    }
+
     let call_indices: Vec<usize> = legs
         .iter()
         .enumerate()
@@ -72,18 +125,15 @@ fn identify_iron_condors(
     }
 
     let mut consumed = Vec::new();
-    // Try to find bear call spread + bull put spread pairs
+    let mut candidates = Vec::new();
+
     for &ci1 in &call_indices {
-        if consumed.contains(&ci1) {
-            continue;
-        }
         for &ci2 in &call_indices {
-            if ci2 == ci1 || consumed.contains(&ci2) {
+            if ci2 <= ci1 {
                 continue;
             }
             let c1 = &legs[ci1];
             let c2 = &legs[ci2];
-            // Bear call: short lower strike call, long higher strike call
             let (short_call_idx, long_call_idx) = if c1.net_quantity < 0
                 && c2.net_quantity > 0
                 && c1.strike < c2.strike
@@ -105,18 +155,13 @@ fn identify_iron_condors(
             let expiry = legs[short_call_idx].expiry.clone();
             let qty = legs[short_call_idx].net_quantity.unsigned_abs() as i64;
 
-            // Find matching bull put spread in same expiry
             for &pi1 in &put_indices {
-                if consumed.contains(&pi1) {
-                    continue;
-                }
                 for &pi2 in &put_indices {
-                    if pi2 == pi1 || consumed.contains(&pi2) {
+                    if pi2 <= pi1 {
                         continue;
                     }
                     let p1 = &legs[pi1];
                     let p2 = &legs[pi2];
-                    // Bull put: short higher strike put, long lower strike put
                     let (short_put_idx, long_put_idx) = if p1.net_quantity < 0
                         && p2.net_quantity > 0
                         && p1.strike > p2.strike
@@ -150,37 +195,85 @@ fn identify_iron_condors(
                     let gross_put_spread_risk = put_width * qty as f64 * 100.0;
                     let total_credit = spread_credit_total(sc, lc) + spread_credit_total(sp, lp);
                     let max_side_risk = gross_call_spread_risk.max(gross_put_spread_risk);
-                    let margin = (max_side_risk - total_credit).max(0.0);
 
-                    out.push(IdentifiedStrategy {
-                        kind: StrategyKind::IronCondor,
-                        underlying: underlying.to_string(),
-                        legs: vec![
-                            pos_to_leg(sc),
-                            pos_to_leg(lc),
-                            pos_to_leg(sp),
-                            pos_to_leg(lp),
+                    let mut symbol_key = vec![
+                        sc.symbol.clone(),
+                        lc.symbol.clone(),
+                        sp.symbol.clone(),
+                        lp.symbol.clone(),
+                    ];
+                    symbol_key.sort();
+
+                    candidates.push(IronCondorCandidate {
+                        short_call_idx,
+                        long_call_idx,
+                        short_put_idx,
+                        long_put_idx,
+                        expiry: expiry.clone().unwrap_or_default(),
+                        max_side_risk,
+                        total_credit,
+                        symbol_key: [
+                            symbol_key[0].clone(),
+                            symbol_key[1].clone(),
+                            symbol_key[2].clone(),
+                            symbol_key[3].clone(),
                         ],
-                        margin: StrategyMargin {
-                            margin_required: margin,
-                            method: format!(
-                                "max_side_risk({:.2}) - total_credit({:.2}) = {:.2}",
-                                max_side_risk, total_credit, margin
-                            ),
-                        },
-                        max_profit: None,
-                        max_loss: Some(margin),
-                        breakeven: vec![],
                     });
-
-                    consumed.extend([short_call_idx, long_call_idx, short_put_idx, long_put_idx]);
-                    break;
-                }
-                if consumed.contains(&pi1) {
-                    break; // already matched
                 }
             }
         }
+    }
+
+    candidates.sort_by(|a, b| {
+        a.expiry
+            .cmp(&b.expiry)
+            .then_with(|| a.max_side_risk.total_cmp(&b.max_side_risk))
+            .then_with(|| b.total_credit.total_cmp(&a.total_credit))
+            .then_with(|| a.symbol_key.cmp(&b.symbol_key))
+    });
+
+    for candidate in candidates {
+        if consumed.contains(&candidate.short_call_idx)
+            || consumed.contains(&candidate.long_call_idx)
+            || consumed.contains(&candidate.short_put_idx)
+            || consumed.contains(&candidate.long_put_idx)
+        {
+            continue;
+        }
+
+        let sc = &legs[candidate.short_call_idx];
+        let lc = &legs[candidate.long_call_idx];
+        let sp = &legs[candidate.short_put_idx];
+        let lp = &legs[candidate.long_put_idx];
+        let margin = (candidate.max_side_risk - candidate.total_credit).max(0.0);
+
+        out.push(IdentifiedStrategy {
+            kind: StrategyKind::IronCondor,
+            underlying: underlying.to_string(),
+            legs: vec![
+                pos_to_leg(sc),
+                pos_to_leg(lc),
+                pos_to_leg(sp),
+                pos_to_leg(lp),
+            ],
+            margin: StrategyMargin {
+                margin_required: margin,
+                method: format!(
+                    "max_side_risk({:.2}) - total_credit({:.2}) = {:.2}",
+                    candidate.max_side_risk, candidate.total_credit, margin
+                ),
+            },
+            max_profit: None,
+            max_loss: Some(margin),
+            breakeven: vec![],
+        });
+
+        consumed.extend([
+            candidate.short_call_idx,
+            candidate.long_call_idx,
+            candidate.short_put_idx,
+            candidate.long_put_idx,
+        ]);
     }
 
     remove_consumed(legs, &consumed);
@@ -195,6 +288,18 @@ fn identify_cross_expiry_spreads(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
+    #[derive(Clone)]
+    struct CrossExpiryCandidate {
+        short_idx: usize,
+        long_idx: usize,
+        kind: StrategyKind,
+        strike_gap: f64,
+        short_expiry: String,
+        long_expiry: String,
+        short_symbol: String,
+        long_symbol: String,
+    }
+
     let short_indices: Vec<usize> = legs
         .iter()
         .enumerate()
@@ -203,21 +308,16 @@ fn identify_cross_expiry_spreads(
         .collect();
 
     let mut consumed = Vec::new();
+    let mut candidates = Vec::new();
 
     for short_idx in short_indices {
-        if consumed.contains(&short_idx) {
-            continue;
-        }
-
         let short = &legs[short_idx];
         let Some(short_expiry) = short.expiry.as_deref() else {
             continue;
         };
 
-        let mut best_match: Option<(usize, StrategyKind, f64)> = None;
-
         for (long_idx, long) in legs.iter().enumerate() {
-            if long_idx == short_idx || consumed.contains(&long_idx) {
+            if long_idx == short_idx {
                 continue;
             }
             if long.side != short.side || long.net_quantity <= 0 {
@@ -238,24 +338,38 @@ fn identify_cross_expiry_spreads(
                 continue;
             };
 
-            let strike_gap = (short.strike.unwrap_or(0.0) - long.strike.unwrap_or(0.0)).abs();
-            let priority = if strike_gap < 0.01 { 0.0 } else { 1.0 };
-            let sort_key = priority * 10_000.0 + strike_gap;
+            candidates.push(CrossExpiryCandidate {
+                short_idx,
+                long_idx,
+                kind,
+                strike_gap: (short.strike.unwrap_or(0.0) - long.strike.unwrap_or(0.0)).abs(),
+                short_expiry: short_expiry.to_string(),
+                long_expiry: long_expiry.to_string(),
+                short_symbol: short.symbol.clone(),
+                long_symbol: long.symbol.clone(),
+            });
+        }
+    }
 
-            match best_match {
-                Some((_, _, best_key)) if best_key <= sort_key => {}
-                _ => best_match = Some((long_idx, kind, sort_key)),
-            }
+    candidates.sort_by(|a, b| {
+        cross_expiry_kind_priority(&a.kind)
+            .cmp(&cross_expiry_kind_priority(&b.kind))
+            .then_with(|| a.strike_gap.total_cmp(&b.strike_gap))
+            .then_with(|| a.short_expiry.cmp(&b.short_expiry))
+            .then_with(|| a.long_expiry.cmp(&b.long_expiry))
+            .then_with(|| a.short_symbol.cmp(&b.short_symbol))
+            .then_with(|| a.long_symbol.cmp(&b.long_symbol))
+    });
+
+    for candidate in candidates {
+        if consumed.contains(&candidate.short_idx) || consumed.contains(&candidate.long_idx) {
+            continue;
         }
 
-        let Some((long_idx, kind, _)) = best_match else {
-            continue;
-        };
-
-        let short = &legs[short_idx];
-        let long = &legs[long_idx];
+        let short = &legs[candidate.short_idx];
+        let long = &legs[candidate.long_idx];
         let net_debit = spread_debit_total(short, long);
-        let method = match kind {
+        let method = match candidate.kind {
             StrategyKind::CalendarCallSpread | StrategyKind::CalendarPutSpread => {
                 format!("calendar spread max loss equals net debit ({net_debit:.2})")
             }
@@ -266,7 +380,7 @@ fn identify_cross_expiry_spreads(
         };
 
         out.push(IdentifiedStrategy {
-            kind,
+            kind: candidate.kind,
             underlying: underlying.to_string(),
             legs: vec![pos_to_leg(short), pos_to_leg(long)],
             margin: StrategyMargin {
@@ -278,10 +392,30 @@ fn identify_cross_expiry_spreads(
             breakeven: vec![],
         });
 
-        consumed.extend([short_idx, long_idx]);
+        consumed.extend([candidate.short_idx, candidate.long_idx]);
     }
 
     remove_consumed(legs, &consumed);
+}
+
+fn cross_expiry_kind_priority(kind: &StrategyKind) -> u8 {
+    match kind {
+        StrategyKind::CalendarCallSpread | StrategyKind::CalendarPutSpread => 0,
+        StrategyKind::DiagonalCallSpread | StrategyKind::DiagonalPutSpread => 1,
+        _ => 2,
+    }
+}
+
+fn same_expiry_kind_priority(kind: &StrategyKind) -> u8 {
+    match kind {
+        StrategyKind::Straddle => 0,
+        StrategyKind::Strangle => 1,
+        StrategyKind::BullPutSpread => 2,
+        StrategyKind::BearCallSpread => 3,
+        StrategyKind::BullCallSpread => 4,
+        StrategyKind::BearPutSpread => 5,
+        _ => 6,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +428,17 @@ fn identify_butterflies(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
+    #[derive(Clone)]
+    struct ButterflyCandidate {
+        left_idx: usize,
+        body_idx: usize,
+        right_idx: usize,
+        expiry: String,
+        width: f64,
+        side_priority: u8,
+        symbol_key: [String; 3],
+    }
+
     for side_str in &["call", "put"] {
         let mut indices: Vec<usize> = legs
             .iter()
@@ -315,52 +460,95 @@ fn identify_butterflies(
         });
 
         let mut consumed = Vec::new();
-        let mut i = 0;
-        while i + 2 < indices.len() {
-            let a = indices[i];
-            let b = indices[i + 1];
-            let c = indices[i + 2];
+        let mut candidates = Vec::new();
 
-            if consumed.contains(&a) || consumed.contains(&b) || consumed.contains(&c) {
-                i += 1;
+        for left in 0..indices.len() {
+            for body in (left + 1)..indices.len() {
+                for right in (body + 1)..indices.len() {
+                    let a = indices[left];
+                    let b = indices[body];
+                    let c = indices[right];
+                    let la = &legs[a];
+                    let lb = &legs[b];
+                    let lc = &legs[c];
+
+                    if la.expiry != lb.expiry || lb.expiry != lc.expiry {
+                        continue;
+                    }
+
+                    let left_qty = la.net_quantity;
+                    let body_qty = lb.net_quantity;
+                    let right_qty = lc.net_quantity;
+                    let is_long_butterfly = left_qty > 0
+                        && body_qty < 0
+                        && right_qty > 0
+                        && body_qty.unsigned_abs() == 2 * left_qty.unsigned_abs()
+                        && left_qty == right_qty;
+                    if !is_long_butterfly {
+                        continue;
+                    }
+
+                    let left_strike = la.strike.unwrap_or(0.0);
+                    let body_strike = lb.strike.unwrap_or(0.0);
+                    let right_strike = lc.strike.unwrap_or(0.0);
+                    let width = ((body_strike - left_strike).abs()
+                        + (right_strike - body_strike).abs())
+                        / 2.0;
+
+                    let mut symbol_key =
+                        vec![la.symbol.clone(), lb.symbol.clone(), lc.symbol.clone()];
+                    symbol_key.sort();
+
+                    candidates.push(ButterflyCandidate {
+                        left_idx: a,
+                        body_idx: b,
+                        right_idx: c,
+                        expiry: la.expiry.clone().unwrap_or_default(),
+                        width,
+                        side_priority: if *side_str == "call" { 0 } else { 1 },
+                        symbol_key: [
+                            symbol_key[0].clone(),
+                            symbol_key[1].clone(),
+                            symbol_key[2].clone(),
+                        ],
+                    });
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| {
+            a.expiry
+                .cmp(&b.expiry)
+                .then_with(|| a.side_priority.cmp(&b.side_priority))
+                .then_with(|| a.width.total_cmp(&b.width))
+                .then_with(|| a.symbol_key.cmp(&b.symbol_key))
+        });
+
+        for candidate in candidates {
+            if consumed.contains(&candidate.left_idx)
+                || consumed.contains(&candidate.body_idx)
+                || consumed.contains(&candidate.right_idx)
+            {
                 continue;
             }
 
-            let la = &legs[a];
-            let lb = &legs[b];
-            let lc = &legs[c];
+            let la = &legs[candidate.left_idx];
+            let lb = &legs[candidate.body_idx];
+            let lc = &legs[candidate.right_idx];
 
-            // Same expiry
-            if la.expiry != lb.expiry || lb.expiry != lc.expiry {
-                i += 1;
-                continue;
-            }
-
-            // Pattern: long 1 + short 2 + long 1
-            let is_long_butterfly = la.net_quantity > 0
-                && lb.net_quantity < 0
-                && lc.net_quantity > 0
-                && lb.net_quantity.unsigned_abs() == 2 * la.net_quantity.unsigned_abs()
-                && la.net_quantity == lc.net_quantity;
-
-            if is_long_butterfly {
-                out.push(IdentifiedStrategy {
-                    kind: StrategyKind::Butterfly,
-                    underlying: underlying.to_string(),
-                    legs: vec![pos_to_leg(la), pos_to_leg(lb), pos_to_leg(lc)],
-                    margin: StrategyMargin {
-                        margin_required: 0.0, // long butterfly has no margin (net debit)
-                        method: "Debit strategy, no margin required".to_string(),
-                    },
-                    max_profit: None,
-                    max_loss: None,
-                    breakeven: vec![],
-                });
-                consumed.extend([a, b, c]);
-                i += 3;
-            } else {
-                i += 1;
-            }
+            out.push(IdentifiedStrategy {
+                kind: StrategyKind::Butterfly,
+                underlying: underlying.to_string(),
+                legs: vec![pos_to_leg(la), pos_to_leg(lb), pos_to_leg(lc)],
+                margin: StrategyMargin {
+                    margin_required: 0.0,
+                    method: "Debit strategy, no margin required".to_string(),
+                },
+                max_profit: None,
+                max_loss: None,
+                breakeven: vec![],
+            });
+            consumed.extend([candidate.left_idx, candidate.body_idx, candidate.right_idx]);
         }
         remove_consumed(legs, &consumed);
     }
@@ -375,7 +563,19 @@ fn identify_vertical_spreads(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
+    #[derive(Clone)]
+    struct VerticalCandidate {
+        first_idx: usize,
+        second_idx: usize,
+        kind: StrategyKind,
+        width: f64,
+        expiry: String,
+        short_symbol: String,
+        long_symbol: String,
+    }
+
     let mut consumed = Vec::new();
+    let mut candidates = Vec::new();
 
     for side_str in &["put", "call"] {
         let indices: Vec<usize> = legs
@@ -385,13 +585,9 @@ fn identify_vertical_spreads(
             .map(|(i, _)| i)
             .collect();
 
-        // Find short + long pairs at different strikes, same expiry
         for &i in &indices {
-            if consumed.contains(&i) {
-                continue;
-            }
             for &j in &indices {
-                if j == i || consumed.contains(&j) {
+                if j <= i {
                     continue;
                 }
 
@@ -418,9 +614,7 @@ fn identify_vertical_spreads(
                     continue;
                 }
 
-                let qty = a.net_quantity.unsigned_abs() as f64;
                 let width = (a_strike - b_strike).abs();
-                let gross_spread_risk = width * qty * 100.0;
 
                 let (short, long) = if a.net_quantity < 0 { (a, b) } else { (b, a) };
                 let short_strike = short.strike.unwrap_or(0.0);
@@ -434,44 +628,78 @@ fn identify_vertical_spreads(
                     _ => continue,
                 };
 
-                let net_credit_total = spread_credit_total(short, long);
-                let net_debit_total = spread_debit_total(short, long);
-                let (margin_required, max_loss, margin_method) = match kind {
-                    StrategyKind::BullPutSpread | StrategyKind::BearCallSpread => {
-                        let max_loss = (gross_spread_risk - net_credit_total).max(0.0);
-                        (
-                            max_loss,
-                            Some(max_loss),
-                            format!(
-                                "gross_width_risk({:.2}) - net_credit({:.2}) = {:.2}",
-                                gross_spread_risk, net_credit_total, max_loss
-                            ),
-                        )
-                    }
-                    _ => (
-                        0.0,
-                        Some(net_debit_total.max(0.0)),
-                        "Debit spread, no margin required".to_string(),
-                    ),
+                let Some(expiry) = a.expiry.clone() else {
+                    continue;
                 };
 
-                out.push(IdentifiedStrategy {
+                candidates.push(VerticalCandidate {
+                    first_idx: i,
+                    second_idx: j,
                     kind,
-                    underlying: underlying.to_string(),
-                    legs: vec![pos_to_leg(short), pos_to_leg(long)],
-                    margin: StrategyMargin {
-                        margin_required,
-                        method: margin_method,
-                    },
-                    max_profit: None,
-                    max_loss,
-                    breakeven: vec![],
+                    width,
+                    expiry,
+                    short_symbol: short.symbol.clone(),
+                    long_symbol: long.symbol.clone(),
                 });
-
-                consumed.extend([i, j]);
-                break;
             }
         }
+    }
+
+    candidates.sort_by(|a, b| {
+        same_expiry_kind_priority(&a.kind)
+            .cmp(&same_expiry_kind_priority(&b.kind))
+            .then_with(|| a.width.total_cmp(&b.width))
+            .then_with(|| a.expiry.cmp(&b.expiry))
+            .then_with(|| a.short_symbol.cmp(&b.short_symbol))
+            .then_with(|| a.long_symbol.cmp(&b.long_symbol))
+    });
+
+    for candidate in candidates {
+        if consumed.contains(&candidate.first_idx) || consumed.contains(&candidate.second_idx) {
+            continue;
+        }
+
+        let a = &legs[candidate.first_idx];
+        let b = &legs[candidate.second_idx];
+        let qty = a.net_quantity.unsigned_abs() as f64;
+        let gross_spread_risk = candidate.width * qty * 100.0;
+
+        let (short, long) = if a.net_quantity < 0 { (a, b) } else { (b, a) };
+        let net_credit_total = spread_credit_total(short, long);
+        let net_debit_total = spread_debit_total(short, long);
+        let (margin_required, max_loss, margin_method) = match candidate.kind {
+            StrategyKind::BullPutSpread | StrategyKind::BearCallSpread => {
+                let max_loss = (gross_spread_risk - net_credit_total).max(0.0);
+                (
+                    max_loss,
+                    Some(max_loss),
+                    format!(
+                        "gross_width_risk({:.2}) - net_credit({:.2}) = {:.2}",
+                        gross_spread_risk, net_credit_total, max_loss
+                    ),
+                )
+            }
+            _ => (
+                0.0,
+                Some(net_debit_total.max(0.0)),
+                "Debit spread, no margin required".to_string(),
+            ),
+        };
+
+        out.push(IdentifiedStrategy {
+            kind: candidate.kind,
+            underlying: underlying.to_string(),
+            legs: vec![pos_to_leg(short), pos_to_leg(long)],
+            margin: StrategyMargin {
+                margin_required,
+                method: margin_method,
+            },
+            max_profit: None,
+            max_loss,
+            breakeven: vec![],
+        });
+
+        consumed.extend([candidate.first_idx, candidate.second_idx]);
     }
 
     remove_consumed(legs, &consumed);
@@ -486,6 +714,15 @@ fn identify_covered_calls(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
+    #[derive(Clone)]
+    struct CoveredCallCandidate {
+        call_idx: usize,
+        shares_needed: i64,
+        expiry: String,
+        strike: f64,
+        symbol: String,
+    }
+
     let stock_idx = legs
         .iter()
         .position(|p| p.side == "stock" && p.net_quantity > 0);
@@ -497,53 +734,68 @@ fn identify_covered_calls(
     let mut consumed = Vec::new();
     let stock = &legs[stock_idx];
     let mut remaining_shares = stock.net_quantity;
+    let mut candidates = Vec::new();
 
-    // Find short calls coverable by shares (100 shares per contract)
-    let short_call_indices: Vec<usize> = legs
-        .iter()
-        .enumerate()
-        .filter(|(i, p)| *i != stock_idx && p.side == "call" && p.net_quantity < 0)
-        .map(|(i, _)| i)
-        .collect();
-
-    for &ci in &short_call_indices {
-        let call = &legs[ci];
+    for (ci, call) in legs.iter().enumerate() {
+        if ci == stock_idx || call.side != "call" || call.net_quantity >= 0 {
+            continue;
+        }
         let contracts = call.net_quantity.unsigned_abs() as i64;
         let shares_needed = contracts * 100;
-
-        if remaining_shares >= shares_needed {
-            out.push(IdentifiedStrategy {
-                kind: StrategyKind::CoveredCall,
-                underlying: underlying.to_string(),
-                legs: vec![
-                    StrategyLeg {
-                        symbol: stock.symbol.clone(),
-                        side: "stock".to_string(),
-                        strike: None,
-                        expiry: None,
-                        quantity: shares_needed,
-                        price: stock.avg_cost,
-                    },
-                    pos_to_leg(call),
-                ],
-                margin: StrategyMargin {
-                    margin_required: 0.0,
-                    method: "Covered by stock position".to_string(),
-                },
-                max_profit: None,
-                max_loss: None,
-                breakeven: vec![],
-            });
-            remaining_shares -= shares_needed;
-            consumed.push(ci);
-        }
+        let Some(expiry) = call.expiry.clone() else {
+            continue;
+        };
+        candidates.push(CoveredCallCandidate {
+            call_idx: ci,
+            shares_needed,
+            expiry,
+            strike: call.strike.unwrap_or(0.0),
+            symbol: call.symbol.clone(),
+        });
     }
 
-    // If all stock was consumed for covered calls
+    candidates.sort_by(|a, b| {
+        a.expiry
+            .cmp(&b.expiry)
+            .then_with(|| a.strike.total_cmp(&b.strike))
+            .then_with(|| a.symbol.cmp(&b.symbol))
+    });
+
+    for candidate in candidates {
+        if remaining_shares < candidate.shares_needed {
+            continue;
+        }
+
+        let call = &legs[candidate.call_idx];
+        out.push(IdentifiedStrategy {
+            kind: StrategyKind::CoveredCall,
+            underlying: underlying.to_string(),
+            legs: vec![
+                StrategyLeg {
+                    symbol: stock.symbol.clone(),
+                    side: "stock".to_string(),
+                    strike: None,
+                    expiry: None,
+                    quantity: candidate.shares_needed,
+                    price: stock.avg_cost,
+                },
+                pos_to_leg(call),
+            ],
+            margin: StrategyMargin {
+                margin_required: 0.0,
+                method: "Covered by stock position".to_string(),
+            },
+            max_profit: None,
+            max_loss: None,
+            breakeven: vec![],
+        });
+        remaining_shares -= candidate.shares_needed;
+        consumed.push(candidate.call_idx);
+    }
+
     if remaining_shares == 0 {
         consumed.push(stock_idx);
     } else {
-        // Update stock quantity only
         legs[stock_idx].net_quantity = remaining_shares;
     }
 
@@ -559,7 +811,19 @@ fn identify_straddles_strangles(
     legs: &mut Vec<Position>,
     out: &mut Vec<IdentifiedStrategy>,
 ) {
+    #[derive(Clone)]
+    struct StraddleCandidate {
+        call_idx: usize,
+        put_idx: usize,
+        kind: StrategyKind,
+        strike_gap: f64,
+        expiry: String,
+        call_symbol: String,
+        put_symbol: String,
+    }
+
     let mut consumed = Vec::new();
+    let mut candidates = Vec::new();
 
     let call_indices: Vec<usize> = legs
         .iter()
@@ -575,14 +839,7 @@ fn identify_straddles_strangles(
         .collect();
 
     for &ci in &call_indices {
-        if consumed.contains(&ci) {
-            continue;
-        }
         for &pi in &put_indices {
-            if consumed.contains(&pi) {
-                continue;
-            }
-
             let call = &legs[ci];
             let put = &legs[pi];
 
@@ -602,48 +859,78 @@ fn identify_straddles_strangles(
             } else {
                 StrategyKind::Strangle
             };
-
-            let is_short = call.net_quantity < 0;
-            let qty = call.net_quantity.unsigned_abs();
-            let spot_proxy = if same_strike {
-                call.strike.unwrap_or(0.0)
-            } else {
-                (call.strike.unwrap_or(0.0) + put.strike.unwrap_or(0.0)) / 2.0
-            };
-            let margin = if is_short {
-                let call_leg_margin =
-                    naked_call_margin(spot_proxy, call.strike.unwrap_or(0.0), qty, call.avg_cost);
-                let put_leg_margin =
-                    naked_put_margin(spot_proxy, put.strike.unwrap_or(0.0), qty, put.avg_cost);
-                let call_premium_total = option_premium_total(call);
-                let put_premium_total = option_premium_total(put);
-                (call_leg_margin + put_premium_total).max(put_leg_margin + call_premium_total)
-            } else {
-                0.0
+            let Some(expiry) = call.expiry.clone() else {
+                continue;
             };
 
-            out.push(IdentifiedStrategy {
+            candidates.push(StraddleCandidate {
+                call_idx: ci,
+                put_idx: pi,
                 kind,
-                underlying: underlying.to_string(),
-                legs: vec![pos_to_leg(call), pos_to_leg(put)],
-                margin: StrategyMargin {
-                    margin_required: margin,
-                    method: if is_short {
-                        format!(
-                            "max(short_call_req + put_premium, short_put_req + call_premium) using spot proxy {:.2}",
-                            spot_proxy
-                        )
-                    } else {
-                        "Debit strategy, no margin required".to_string()
-                    },
-                },
-                max_profit: None,
-                max_loss: None,
-                breakeven: vec![],
+                strike_gap: (call.strike.unwrap_or(0.0) - put.strike.unwrap_or(0.0)).abs(),
+                expiry,
+                call_symbol: call.symbol.clone(),
+                put_symbol: put.symbol.clone(),
             });
-            consumed.extend([ci, pi]);
-            break;
         }
+    }
+
+    candidates.sort_by(|a, b| {
+        same_expiry_kind_priority(&a.kind)
+            .cmp(&same_expiry_kind_priority(&b.kind))
+            .then_with(|| a.strike_gap.total_cmp(&b.strike_gap))
+            .then_with(|| a.expiry.cmp(&b.expiry))
+            .then_with(|| a.call_symbol.cmp(&b.call_symbol))
+            .then_with(|| a.put_symbol.cmp(&b.put_symbol))
+    });
+
+    for candidate in candidates {
+        if consumed.contains(&candidate.call_idx) || consumed.contains(&candidate.put_idx) {
+            continue;
+        }
+
+        let call = &legs[candidate.call_idx];
+        let put = &legs[candidate.put_idx];
+        let is_short = call.net_quantity < 0;
+        let qty = call.net_quantity.unsigned_abs();
+        let same_strike = matches!(candidate.kind, StrategyKind::Straddle);
+        let spot_proxy = if same_strike {
+            call.strike.unwrap_or(0.0)
+        } else {
+            (call.strike.unwrap_or(0.0) + put.strike.unwrap_or(0.0)) / 2.0
+        };
+        let margin = if is_short {
+            let call_leg_margin =
+                naked_call_margin(spot_proxy, call.strike.unwrap_or(0.0), qty, call.avg_cost);
+            let put_leg_margin =
+                naked_put_margin(spot_proxy, put.strike.unwrap_or(0.0), qty, put.avg_cost);
+            let call_premium_total = option_premium_total(call);
+            let put_premium_total = option_premium_total(put);
+            (call_leg_margin + put_premium_total).max(put_leg_margin + call_premium_total)
+        } else {
+            0.0
+        };
+
+        out.push(IdentifiedStrategy {
+            kind: candidate.kind,
+            underlying: underlying.to_string(),
+            legs: vec![pos_to_leg(call), pos_to_leg(put)],
+            margin: StrategyMargin {
+                margin_required: margin,
+                method: if is_short {
+                    format!(
+                        "max(short_call_req + put_premium, short_put_req + call_premium) using spot proxy {:.2}",
+                        spot_proxy
+                    )
+                } else {
+                    "Debit strategy, no margin required".to_string()
+                },
+            },
+            max_profit: None,
+            max_loss: None,
+            breakeven: vec![],
+        });
+        consumed.extend([candidate.call_idx, candidate.put_idx]);
     }
 
     remove_consumed(legs, &consumed);
@@ -920,6 +1207,62 @@ mod tests {
     }
 
     #[test]
+    fn covered_call_matching_is_stable_across_input_order() {
+        let ordered = vec![
+            stock_pos("TSLA", 200, 350.0),
+            option_pos(
+                "TSLA_C390_NEAR",
+                "TSLA",
+                "call",
+                390.0,
+                "2026-03-20",
+                -1,
+                8.0,
+            ),
+            option_pos(
+                "TSLA_C400_FAR",
+                "TSLA",
+                "call",
+                400.0,
+                "2026-04-17",
+                -1,
+                6.0,
+            ),
+            option_pos(
+                "TSLA_C380_NEAR",
+                "TSLA",
+                "call",
+                380.0,
+                "2026-03-20",
+                -1,
+                9.0,
+            ),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+        let reversed_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+
+        assert_eq!(ordered_kinds, reversed_kinds);
+    }
+
+    #[test]
     fn identifies_bull_put_spread() {
         let positions = vec![
             option_pos(
@@ -992,6 +1335,40 @@ mod tests {
         assert_eq!(strategies[0].legs.len(), 4);
         // Max side width = 1000, total credit = 300 + 200 = 500
         assert!((strategies[0].margin.margin_required - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn iron_condor_matching_is_stable_across_input_order() {
+        let ordered = vec![
+            option_pos("TSLA_C400", "TSLA", "call", 400.0, "2026-03-20", -1, 5.0),
+            option_pos("TSLA_C410", "TSLA", "call", 410.0, "2026-03-20", 1, 2.0),
+            option_pos("TSLA_C420", "TSLA", "call", 420.0, "2026-03-20", 1, 1.0),
+            option_pos("TSLA_P350", "TSLA", "put", 350.0, "2026-03-20", -1, 4.0),
+            option_pos("TSLA_P340", "TSLA", "put", 340.0, "2026-03-20", 1, 2.0),
+            option_pos("TSLA_P330", "TSLA", "put", 330.0, "2026-03-20", 1, 1.0),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+        let reversed_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+
+        assert_eq!(ordered_kinds, reversed_kinds);
     }
 
     #[test]
@@ -1096,6 +1473,209 @@ mod tests {
     }
 
     #[test]
+    fn cross_expiry_matching_is_stable_across_input_order() {
+        let ordered = vec![
+            option_pos(
+                "TSLA_C450_NEAR",
+                "TSLA",
+                "call",
+                450.0,
+                "2026-04-10",
+                -1,
+                7.49,
+            ),
+            option_pos(
+                "TSLA_C440_NEAR",
+                "TSLA",
+                "call",
+                440.0,
+                "2026-04-17",
+                -1,
+                12.45,
+            ),
+            option_pos(
+                "TSLA_C430_FAR",
+                "TSLA",
+                "call",
+                430.0,
+                "2026-05-15",
+                1,
+                23.79,
+            ),
+            option_pos(
+                "TSLA_C450_FAR",
+                "TSLA",
+                "call",
+                450.0,
+                "2026-06-18",
+                1,
+                26.52,
+            ),
+        ];
+        let reversed = vec![
+            option_pos(
+                "TSLA_C450_FAR",
+                "TSLA",
+                "call",
+                450.0,
+                "2026-06-18",
+                1,
+                26.52,
+            ),
+            option_pos(
+                "TSLA_C430_FAR",
+                "TSLA",
+                "call",
+                430.0,
+                "2026-05-15",
+                1,
+                23.79,
+            ),
+            option_pos(
+                "TSLA_C440_NEAR",
+                "TSLA",
+                "call",
+                440.0,
+                "2026-04-17",
+                -1,
+                12.45,
+            ),
+            option_pos(
+                "TSLA_C450_NEAR",
+                "TSLA",
+                "call",
+                450.0,
+                "2026-04-10",
+                -1,
+                7.49,
+            ),
+        ];
+
+        let ordered_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+        let reversed_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+
+        assert_eq!(ordered_kinds, reversed_kinds);
+    }
+
+    #[test]
+    fn butterfly_matching_is_stable_across_input_order() {
+        let ordered = vec![
+            option_pos("TSLA_C380", "TSLA", "call", 380.0, "2026-03-20", 1, 12.0),
+            option_pos("TSLA_C390", "TSLA", "call", 390.0, "2026-03-20", -2, 7.0),
+            option_pos("TSLA_C400", "TSLA", "call", 400.0, "2026-03-20", 1, 3.0),
+            option_pos("TSLA_C410", "TSLA", "call", 410.0, "2026-03-20", 1, 1.5),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+        let reversed_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+
+        assert_eq!(ordered_kinds, reversed_kinds);
+    }
+
+    #[test]
+    fn vertical_matching_is_stable_across_input_order() {
+        let ordered = vec![
+            option_pos(
+                "TSLA_P360_SHORT",
+                "TSLA",
+                "put",
+                360.0,
+                "2026-03-20",
+                -1,
+                7.0,
+            ),
+            option_pos("TSLA_P350_LONG", "TSLA", "put", 350.0, "2026-03-20", 1, 4.0),
+            option_pos(
+                "TSLA_P340_SHORT",
+                "TSLA",
+                "put",
+                340.0,
+                "2026-03-20",
+                -1,
+                3.5,
+            ),
+            option_pos("TSLA_P330_LONG", "TSLA", "put", 330.0, "2026-03-20", 1, 1.5),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+        let reversed_kinds: Vec<(StrategyKind, Vec<String>)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| {
+                let mut legs: Vec<String> =
+                    strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                legs.sort();
+                (strategy.kind, legs)
+            })
+            .collect();
+
+        assert_eq!(ordered_kinds, reversed_kinds);
+    }
+
+    #[test]
+    fn straddle_matching_prefers_same_strike_pair_over_strangle() {
+        let positions = vec![
+            option_pos("TSLA_C380", "TSLA", "call", 380.0, "2026-03-20", -1, 10.0),
+            option_pos("TSLA_P380", "TSLA", "put", 380.0, "2026-03-20", -1, 8.0),
+            option_pos("TSLA_P360", "TSLA", "put", 360.0, "2026-03-20", -1, 4.0),
+        ];
+
+        let strategies = identify_strategies(&positions);
+
+        assert!(
+            strategies
+                .iter()
+                .any(|strategy| strategy.kind == StrategyKind::Straddle)
+        );
+        assert!(
+            !strategies
+                .iter()
+                .any(|strategy| strategy.kind == StrategyKind::Strangle)
+        );
+    }
+
+    #[test]
     fn naked_put_margin_otm() {
         // TSLA at 380, short put at 350 (OTM by 30)
         let margin = naked_put_margin(380.0, 350.0, 1, 5.0);
@@ -1132,6 +1712,80 @@ mod tests {
 
         let long_put = strategies.iter().find(|s| s.kind == StrategyKind::LongPut);
         assert!(long_put.is_some());
+    }
+
+    #[test]
+    fn identify_strategies_orders_underlyings_stably() {
+        let ordered = vec![
+            option_pos("TSLA_P350", "TSLA", "put", 350.0, "2026-03-20", -1, 5.0),
+            option_pos("AAPL_P170", "AAPL", "put", 170.0, "2026-04-17", 1, 3.0),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_result: Vec<(String, StrategyKind)> = identify_strategies(&ordered)
+            .into_iter()
+            .map(|strategy| (strategy.underlying, strategy.kind))
+            .collect();
+        let reversed_result: Vec<(String, StrategyKind)> = identify_strategies(&reversed)
+            .into_iter()
+            .map(|strategy| (strategy.underlying, strategy.kind))
+            .collect();
+
+        assert_eq!(
+            ordered_result,
+            vec![
+                ("AAPL".to_string(), StrategyKind::LongPut),
+                ("TSLA".to_string(), StrategyKind::NakedPut),
+            ]
+        );
+        assert_eq!(ordered_result, reversed_result);
+    }
+
+    #[test]
+    fn identify_strategies_orders_single_leg_residuals_stably() {
+        let ordered = vec![
+            option_pos("TSLA_P350", "TSLA", "put", 350.0, "2026-03-20", -1, 5.0),
+            option_pos("TSLA_C420", "TSLA", "call", 420.0, "2026-04-17", 1, 4.0),
+        ];
+        let reversed: Vec<Position> = ordered.iter().cloned().rev().collect();
+
+        let ordered_result: Vec<(String, StrategyKind, Vec<String>)> =
+            identify_strategies(&ordered)
+                .into_iter()
+                .map(|strategy| {
+                    let mut legs: Vec<String> =
+                        strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                    legs.sort();
+                    (strategy.underlying, strategy.kind, legs)
+                })
+                .collect();
+        let reversed_result: Vec<(String, StrategyKind, Vec<String>)> =
+            identify_strategies(&reversed)
+                .into_iter()
+                .map(|strategy| {
+                    let mut legs: Vec<String> =
+                        strategy.legs.into_iter().map(|leg| leg.symbol).collect();
+                    legs.sort();
+                    (strategy.underlying, strategy.kind, legs)
+                })
+                .collect();
+
+        assert_eq!(
+            ordered_result,
+            vec![
+                (
+                    "TSLA".to_string(),
+                    StrategyKind::LongCall,
+                    vec!["TSLA_C420".to_string()],
+                ),
+                (
+                    "TSLA".to_string(),
+                    StrategyKind::NakedPut,
+                    vec!["TSLA_P350".to_string()],
+                ),
+            ]
+        );
+        assert_eq!(ordered_result, reversed_result);
     }
 
     #[test]
