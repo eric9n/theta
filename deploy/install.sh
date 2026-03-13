@@ -131,6 +131,14 @@ install_bundle() {
   fi
 
   install -d "${SHARE_DIR}"
+  if [[ -d "${bundle_dir}/deploy/taskd" ]]; then
+    rm -rf "${SHARE_DIR}/taskd"
+    cp -R "${bundle_dir}/deploy/taskd" "${SHARE_DIR}/taskd"
+    if [[ -f "${SHARE_DIR}/taskd/install-taskd.sh" ]]; then
+      chmod 0755 "${SHARE_DIR}/taskd/install-taskd.sh"
+    fi
+    echo "Installed theta taskd assets to ${SHARE_DIR}/taskd"
+  fi
   if [[ "${INSTALL_SKILLS}" != "0" ]] && [[ -d "${bundle_dir}/skills" ]]; then
     rm -rf "${SHARE_DIR}/skills"
     cp -R "${bundle_dir}/skills" "${SHARE_DIR}/skills"
@@ -145,14 +153,10 @@ install_bundle() {
   if [[ "${INSTALL_SYSTEMD}" != "0" ]]; then
     install -d "${SYSTEMD_DIR}"
     install -m 0644 "${bundle_dir}/deploy/theta-daemon.service" "${SYSTEMD_DIR}/theta-daemon@.service"
-    install -m 0644 "${bundle_dir}/deploy/capture-signals.service" "${SYSTEMD_DIR}/capture-signals@.service"
-    install -m 0644 "${bundle_dir}/deploy/account-monitor.service" "${SYSTEMD_DIR}/account-monitor@.service"
-    install -m 0644 "${bundle_dir}/deploy/theta-healthcheck.service" "${SYSTEMD_DIR}/theta-healthcheck@.service"
-    install -m 0644 "${bundle_dir}/deploy/theta-healthcheck.timer" "${SYSTEMD_DIR}/theta-healthcheck@.timer"
     if command -v systemctl >/dev/null 2>&1; then
       systemctl daemon-reload
     fi
-    echo "Installed systemd templates to ${SYSTEMD_DIR}"
+    echo "Installed theta-daemon systemd unit to ${SYSTEMD_DIR}"
   fi
 
   if [[ "${REMOVE_LEGACY_ROOT}" == "1" ]] && [[ -d /root/theta ]]; then

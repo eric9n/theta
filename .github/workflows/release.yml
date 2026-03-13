@@ -41,10 +41,10 @@ jobs:
           printf '%s\n' '${{ github.ref_name }}' > dist/VERSION
           cp README.md dist/
           cp deploy/*.service dist/deploy/
-          cp deploy/*.timer dist/deploy/
           cp deploy/*.sh dist/deploy/
+          cp -R deploy/taskd dist/deploy/
           cp -R skills dist/
-          chmod +x dist/deploy/*.sh
+          chmod +x dist/deploy/*.sh dist/deploy/taskd/*.sh
           tar -czf "${ARCHIVE_NAME}.tar.gz" -C dist .
           sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
 

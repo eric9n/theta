@@ -1,0 +1,68 @@
+version: 1
+tasks:
+  # Keep theta-daemon under systemd. These taskd jobs only trigger one-shot CLI runs.
+  - id: theta-capture-signals
+    name: theta capture signals
+    enabled: true
+    concurrency:
+      policy: forbid
+      max_running: 1
+    retry:
+      max_attempts: 2
+      delay_seconds: 15
+    schedule:
+      kind: cron
+      # taskd uses a 6-field cron format: second minute hour day-of-month month day-of-week
+      expr: 0 */5 9-15 ? * Mon-Fri
+      timezone: America/New_York
+    command:
+      program: /usr/local/bin/theta
+      args:
+        - signals
+        - capture
+        - --market-hours-only
+      timeout_seconds: 300
+
+  - id: theta-account-monitor
+    name: theta account monitor
+    enabled: true
+    concurrency:
+      policy: forbid
+      max_running: 1
+    retry:
+      max_attempts: 2
+      delay_seconds: 15
+    schedule:
+      kind: cron
+      expr: 0 */5 9-15 ? * Mon-Fri
+      timezone: America/New_York
+    command:
+      program: /usr/local/bin/theta
+      args:
+        - ops
+        - account-monitor
+        - --once
+        - --account
+        - firstrade
+      timeout_seconds: 300
+
+  - id: theta-healthcheck
+    name: theta healthcheck
+    enabled: true
+    concurrency:
+      policy: forbid
+      max_running: 1
+    retry:
+      max_attempts: 1
+      delay_seconds: 30
+    schedule:
+      kind: cron
+      # Run once after the trading day so the check exercises live market-data paths.
+      expr: 0 0 18 * * *
+      timezone: America/New_York
+    command:
+      program: /usr/local/bin/theta
+      args:
+        - ops
+        - health-check
+      timeout_seconds: 300

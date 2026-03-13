@@ -48,10 +48,10 @@ jobs:
           printf '%s\n' 'dev' > dist/VERSION
           cp README.md dist/
           cp deploy/*.service dist/deploy/
-          cp deploy/*.timer dist/deploy/
           cp deploy/*.sh dist/deploy/
+          cp -R deploy/taskd dist/deploy/
           cp -R skills dist/
-          chmod +x dist/deploy/*.sh
+          chmod +x dist/deploy/*.sh dist/deploy/taskd/*.sh
           tar -czf theta-linux-x86_64.tar.gz -C dist .
 
       - name: Upload release bundle

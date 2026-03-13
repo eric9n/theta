@@ -58,21 +58,19 @@ This installs:
 
 - `/usr/local/bin/theta`
 - `/usr/local/bin/theta-daemon`
+- `/usr/local/share/theta/taskd`
 - `/usr/local/share/theta/skills`
 - `/etc/systemd/system/theta-daemon@.service`
-- `/etc/systemd/system/capture-signals@.service`
-- `/etc/systemd/system/account-monitor@.service`
-- `/etc/systemd/system/theta-healthcheck@.service`
-- `/etc/systemd/system/theta-healthcheck@.timer`
 - bash/zsh/fish shell completions
 
-Then configure credentials and enable services:
+Then configure credentials, enable the daemon, and install the recurring taskd jobs:
 
 ```bash
 mkdir -p ~/.config/theta
 sudo systemctl enable --now theta-daemon@$(whoami)
-sudo systemctl enable --now capture-signals@$(whoami)
-sudo systemctl enable --now account-monitor@$(whoami)
+sudo /usr/local/share/theta/taskd/install-taskd.sh \
+  --user "$(whoami)" \
+  --account firstrade
 ```
 
 Run a manual live self-check any time:
@@ -143,18 +141,33 @@ cargo run --bin theta -- signals capture \
   --market-hours-only
 ```
 
-## systemd Service
+## systemd Daemon
 
-For VPS deployment, the installer puts these unit templates in `/etc/systemd/system`:
+For VPS deployment, the installer puts `deploy/theta-daemon.service` into `/etc/systemd/system/theta-daemon@.service`.
 
-- `deploy/theta-daemon.service`: runs the LongPort-backed local socket daemon.
-- `deploy/capture-signals.service`: runs `theta signals capture` every 5 minutes during US regular market hours.
-- `deploy/account-monitor.service`: runs `theta ops account-monitor` every 5 minutes during US regular market hours.
-- `deploy/theta-healthcheck.service`: runs a lightweight live health check against daemon, underlying quote, expiries, and a sampled option chain.
-- `deploy/theta-healthcheck.timer`: optionally runs the live health check once per day.
+`theta-daemon` is the only theta component that remains under systemd. Recurring signal capture, account monitoring, and health-check runs are expected to be scheduled by `taskd`.
 
-`capture-signals` and `account-monitor` depend on `theta-daemon`, and each unit waits for the daemon socket before starting work.
-Only `theta-daemon` needs LongPort credentials. The other units do not need any credential or config `EnvironmentFile` by default.
+## taskd Scheduler
+
+For recurring theta jobs, keep `theta-daemon` under systemd and let `taskd` trigger one-shot CLI runs on a cron schedule.
+
+- Sample config: `deploy/taskd/tasks.yaml.example`
+- Installed taskd assets: `/usr/local/share/theta/taskd/`
+- Keep `theta-daemon@.service` enabled; do not move the daemon itself into `taskd`
+
+The sample uses `America/New_York` cron schedules and keeps `--market-hours-only` on the commands as a guardrail. That means the 09:00-09:25 ET triggers are harmless no-op exits, while still keeping each logical workflow in a single `taskd` task.
+
+Example migration flow:
+
+```bash
+sudo /usr/local/share/theta/taskd/install-taskd.sh \
+  --user "$(whoami)" \
+  --account firstrade
+```
+
+If you prefer hand-editing YAML, use `deploy/taskd/tasks.yaml.example` as the starting point and merge the three `theta-*` tasks into the existing `/etc/taskd/tasks.yaml` instead of replacing unrelated tasks.
+
+If you are upgrading from an older theta install that used systemd for recurring jobs, rerun the installer with `--disable-systemd-schedulers` once to stop the legacy `capture-signals`, `account-monitor`, and `theta-healthcheck` units.
 
 Set LongPort API credentials for the daemon in:
 
@@ -180,15 +193,10 @@ Check logs:
 
 ```bash
 sudo journalctl -u theta-daemon@$(whoami) -f
-sudo journalctl -u capture-signals@$(whoami) -f
-sudo journalctl -u account-monitor@$(whoami) -f
-sudo journalctl -u theta-healthcheck@$(whoami) -f
-```
-
-Enable the optional daily self-check timer:
-
-```bash
-sudo systemctl enable --now theta-healthcheck@$(whoami).timer
+/opt/taskd/taskctl list
+/opt/taskd/taskctl history theta-capture-signals --limit 20
+/opt/taskd/taskctl history theta-account-monitor --limit 20
+/opt/taskd/taskctl history theta-healthcheck --limit 20
 ```
 
 Update to the latest release:
