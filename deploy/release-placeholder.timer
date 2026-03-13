@@ -1,0 +1,3 @@
+# Placeholder file kept so existing release workflows that bundle `deploy/*.timer`
+# continue to produce a release archive. Theta no longer installs or uses systemd
+# timer units for recurring jobs.

@@ -167,7 +167,7 @@ sudo /usr/local/share/theta/taskd/install-taskd.sh \
 
 If you prefer hand-editing YAML, use `deploy/taskd/tasks.yaml.example` as the starting point and merge the three `theta-*` tasks into the existing `/etc/taskd/tasks.yaml` instead of replacing unrelated tasks.
 
-If you are upgrading from an older theta install that used systemd for recurring jobs, rerun the installer with `--disable-systemd-schedulers` once to stop the legacy `capture-signals`, `account-monitor`, and `theta-healthcheck` units.
+If you are upgrading from an older theta install that used systemd for recurring jobs, rerun the installer with `--disable-systemd-schedulers` once to stop the legacy `capture-signals`, `account-monitor`, and `theta-healthcheck` units. The source tree also includes a sample config at `deploy/taskd/tasks.yaml.example`.
 
 Set LongPort API credentials for the daemon in:
 

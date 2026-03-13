@@ -131,12 +131,10 @@ install_bundle() {
   fi
 
   install -d "${SHARE_DIR}"
-  if [[ -d "${bundle_dir}/deploy/taskd" ]]; then
-    rm -rf "${SHARE_DIR}/taskd"
-    cp -R "${bundle_dir}/deploy/taskd" "${SHARE_DIR}/taskd"
-    if [[ -f "${SHARE_DIR}/taskd/install-taskd.sh" ]]; then
-      chmod 0755 "${SHARE_DIR}/taskd/install-taskd.sh"
-    fi
+  rm -rf "${SHARE_DIR}/taskd"
+  install -d "${SHARE_DIR}/taskd"
+  if [[ -f "${bundle_dir}/deploy/install-taskd.sh" ]]; then
+    install -m 0755 "${bundle_dir}/deploy/install-taskd.sh" "${SHARE_DIR}/taskd/install-taskd.sh"
     echo "Installed theta taskd assets to ${SHARE_DIR}/taskd"
   fi
   if [[ "${INSTALL_SKILLS}" != "0" ]] && [[ -d "${bundle_dir}/skills" ]]; then
