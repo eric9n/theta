@@ -7,7 +7,11 @@ use std::path::PathBuf;
 #[command(name = "market-extreme")]
 #[command(about = "Measure current market-tone metrics against stored history")]
 pub struct Cli {
-    #[arg(long, help = "Underlying symbol, e.g. TSLA.US")]
+    #[arg(
+        long,
+        default_value = "TSLA.US",
+        help = "Underlying symbol. Default: TSLA.US"
+    )]
     symbol: String,
     #[arg(
         long,
@@ -52,6 +56,8 @@ pub fn run(cli: Cli) -> Result<()> {
     print_metric("term_change", row.term_structure_change_from_front.as_ref());
     print_metric("oi_bias", row.open_interest_bias_ratio.as_ref());
     print_metric("otm_oi_bias", row.otm_open_interest_bias_ratio.as_ref());
+    print_metric("iv_bias", row.average_iv_bias.as_ref());
+    print_metric("otm_iv_bias", row.otm_average_iv_bias.as_ref());
 
     Ok(())
 }

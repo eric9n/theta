@@ -22,6 +22,73 @@ pub struct MarketToneSnapshotRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StrategyMonitorSnapshotRow {
+    pub id: i64,
+    pub captured_at: String,
+    pub symbol: String,
+    pub near_expiry: String,
+    pub near_days_to_expiry: i64,
+    pub far_expiry: String,
+    pub far_days_to_expiry: i64,
+    pub bull_put_net_credit: Option<f64>,
+    pub bear_call_net_credit: Option<f64>,
+    pub iron_condor_net_credit: Option<f64>,
+    pub bull_call_net_debit: Option<f64>,
+    pub calendar_call_net_debit: Option<f64>,
+    pub pmcc_net_debit: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyMonitorSnapshotInput {
+    pub captured_at: String,
+    pub symbol: String,
+    pub near_expiry: String,
+    pub near_days_to_expiry: i64,
+    pub far_expiry: String,
+    pub far_days_to_expiry: i64,
+    pub bull_put_short_strike: Option<f64>,
+    pub bull_put_long_strike: Option<f64>,
+    pub bull_put_net_credit: Option<f64>,
+    pub bull_put_max_loss: Option<f64>,
+    pub bull_put_breakeven: Option<f64>,
+    pub bull_put_annualized_return: Option<f64>,
+    pub bear_call_short_strike: Option<f64>,
+    pub bear_call_long_strike: Option<f64>,
+    pub bear_call_net_credit: Option<f64>,
+    pub bear_call_max_loss: Option<f64>,
+    pub bear_call_breakeven: Option<f64>,
+    pub bear_call_annualized_return: Option<f64>,
+    pub iron_condor_short_put_strike: Option<f64>,
+    pub iron_condor_long_put_strike: Option<f64>,
+    pub iron_condor_short_call_strike: Option<f64>,
+    pub iron_condor_long_call_strike: Option<f64>,
+    pub iron_condor_net_credit: Option<f64>,
+    pub iron_condor_max_loss: Option<f64>,
+    pub iron_condor_breakeven_low: Option<f64>,
+    pub iron_condor_breakeven_high: Option<f64>,
+    pub iron_condor_annualized_return: Option<f64>,
+    pub bull_call_long_strike: Option<f64>,
+    pub bull_call_short_strike: Option<f64>,
+    pub bull_call_net_debit: Option<f64>,
+    pub bull_call_max_profit: Option<f64>,
+    pub bull_call_max_loss: Option<f64>,
+    pub bull_call_breakeven: Option<f64>,
+    pub bull_call_annualized_return: Option<f64>,
+    pub calendar_call_strike: Option<f64>,
+    pub calendar_call_net_debit: Option<f64>,
+    pub calendar_call_theta_carry_per_day: Option<f64>,
+    pub calendar_call_annualized_carry: Option<f64>,
+    pub calendar_call_max_loss: Option<f64>,
+    pub pmcc_near_strike: Option<f64>,
+    pub pmcc_far_strike: Option<f64>,
+    pub pmcc_net_debit: Option<f64>,
+    pub pmcc_theta_carry_per_day: Option<f64>,
+    pub pmcc_annualized_carry: Option<f64>,
+    pub pmcc_max_loss: Option<f64>,
+    pub report_json: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FrontAtmIvRankRow {
     pub symbol: String,
     pub sample_count: usize,
@@ -54,6 +121,8 @@ pub struct MarketExtremeRow {
     pub term_structure_change_from_front: Option<MarketExtremeMetricStat>,
     pub open_interest_bias_ratio: Option<MarketExtremeMetricStat>,
     pub otm_open_interest_bias_ratio: Option<MarketExtremeMetricStat>,
+    pub average_iv_bias: Option<MarketExtremeMetricStat>,
+    pub otm_average_iv_bias: Option<MarketExtremeMetricStat>,
 }
 
 pub struct SignalSnapshotStore {
@@ -200,6 +269,210 @@ impl SignalSnapshotStore {
         Ok(())
     }
 
+    pub fn record_strategy_monitor_snapshot(
+        &self,
+        input: &StrategyMonitorSnapshotInput,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO strategy_monitor_snapshots (
+                captured_at,
+                symbol,
+                near_expiry,
+                near_days_to_expiry,
+                far_expiry,
+                far_days_to_expiry,
+                bull_put_short_strike,
+                bull_put_long_strike,
+                bull_put_net_credit,
+                bull_put_max_loss,
+                bull_put_breakeven,
+                bull_put_annualized_return,
+                bear_call_short_strike,
+                bear_call_long_strike,
+                bear_call_net_credit,
+                bear_call_max_loss,
+                bear_call_breakeven,
+                bear_call_annualized_return,
+                iron_condor_short_put_strike,
+                iron_condor_long_put_strike,
+                iron_condor_short_call_strike,
+                iron_condor_long_call_strike,
+                iron_condor_net_credit,
+                iron_condor_max_loss,
+                iron_condor_breakeven_low,
+                iron_condor_breakeven_high,
+                iron_condor_annualized_return,
+                bull_call_long_strike,
+                bull_call_short_strike,
+                bull_call_net_debit,
+                bull_call_max_profit,
+                bull_call_max_loss,
+                bull_call_breakeven,
+                bull_call_annualized_return,
+                calendar_call_strike,
+                calendar_call_net_debit,
+                calendar_call_theta_carry_per_day,
+                calendar_call_annualized_carry,
+                calendar_call_max_loss,
+                pmcc_near_strike,
+                pmcc_far_strike,
+                pmcc_net_debit,
+                pmcc_theta_carry_per_day,
+                pmcc_annualized_carry,
+                pmcc_max_loss,
+                report_json
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
+                ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46
+            )",
+            params![
+                input.captured_at,
+                input.symbol,
+                input.near_expiry,
+                input.near_days_to_expiry,
+                input.far_expiry,
+                input.far_days_to_expiry,
+                input.bull_put_short_strike,
+                input.bull_put_long_strike,
+                input.bull_put_net_credit,
+                input.bull_put_max_loss,
+                input.bull_put_breakeven,
+                input.bull_put_annualized_return,
+                input.bear_call_short_strike,
+                input.bear_call_long_strike,
+                input.bear_call_net_credit,
+                input.bear_call_max_loss,
+                input.bear_call_breakeven,
+                input.bear_call_annualized_return,
+                input.iron_condor_short_put_strike,
+                input.iron_condor_long_put_strike,
+                input.iron_condor_short_call_strike,
+                input.iron_condor_long_call_strike,
+                input.iron_condor_net_credit,
+                input.iron_condor_max_loss,
+                input.iron_condor_breakeven_low,
+                input.iron_condor_breakeven_high,
+                input.iron_condor_annualized_return,
+                input.bull_call_long_strike,
+                input.bull_call_short_strike,
+                input.bull_call_net_debit,
+                input.bull_call_max_profit,
+                input.bull_call_max_loss,
+                input.bull_call_breakeven,
+                input.bull_call_annualized_return,
+                input.calendar_call_strike,
+                input.calendar_call_net_debit,
+                input.calendar_call_theta_carry_per_day,
+                input.calendar_call_annualized_carry,
+                input.calendar_call_max_loss,
+                input.pmcc_near_strike,
+                input.pmcc_far_strike,
+                input.pmcc_net_debit,
+                input.pmcc_theta_carry_per_day,
+                input.pmcc_annualized_carry,
+                input.pmcc_max_loss,
+                input.report_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_strategy_monitor_snapshots(
+        &self,
+        symbol: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StrategyMonitorSnapshotRow>> {
+        let mut stmt = if symbol.is_some() {
+            self.conn.prepare(
+                "SELECT
+                    id,
+                    captured_at,
+                    symbol,
+                    near_expiry,
+                    near_days_to_expiry,
+                    far_expiry,
+                    far_days_to_expiry,
+                    bull_put_net_credit,
+                    bear_call_net_credit,
+                    iron_condor_net_credit,
+                    bull_call_net_debit,
+                    calendar_call_net_debit,
+                    pmcc_net_debit
+                 FROM strategy_monitor_snapshots
+                 WHERE symbol = ?1
+                 ORDER BY captured_at DESC, id DESC
+                 LIMIT ?2",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT
+                    id,
+                    captured_at,
+                    symbol,
+                    near_expiry,
+                    near_days_to_expiry,
+                    far_expiry,
+                    far_days_to_expiry,
+                    bull_put_net_credit,
+                    bear_call_net_credit,
+                    iron_condor_net_credit,
+                    bull_call_net_debit,
+                    calendar_call_net_debit,
+                    pmcc_net_debit
+                 FROM strategy_monitor_snapshots
+                 ORDER BY captured_at DESC, id DESC
+                 LIMIT ?1",
+            )?
+        };
+
+        let mut result = Vec::new();
+        if let Some(symbol) = symbol {
+            let rows = stmt.query_map(params![symbol, limit as i64], |row| {
+                Ok(StrategyMonitorSnapshotRow {
+                    id: row.get(0)?,
+                    captured_at: row.get(1)?,
+                    symbol: row.get(2)?,
+                    near_expiry: row.get(3)?,
+                    near_days_to_expiry: row.get(4)?,
+                    far_expiry: row.get(5)?,
+                    far_days_to_expiry: row.get(6)?,
+                    bull_put_net_credit: row.get(7)?,
+                    bear_call_net_credit: row.get(8)?,
+                    iron_condor_net_credit: row.get(9)?,
+                    bull_call_net_debit: row.get(10)?,
+                    calendar_call_net_debit: row.get(11)?,
+                    pmcc_net_debit: row.get(12)?,
+                })
+            })?;
+            for row in rows {
+                result.push(row?);
+            }
+        } else {
+            let rows = stmt.query_map(params![limit as i64], |row| {
+                Ok(StrategyMonitorSnapshotRow {
+                    id: row.get(0)?,
+                    captured_at: row.get(1)?,
+                    symbol: row.get(2)?,
+                    near_expiry: row.get(3)?,
+                    near_days_to_expiry: row.get(4)?,
+                    far_expiry: row.get(5)?,
+                    far_days_to_expiry: row.get(6)?,
+                    bull_put_net_credit: row.get(7)?,
+                    bear_call_net_credit: row.get(8)?,
+                    iron_condor_net_credit: row.get(9)?,
+                    bull_call_net_debit: row.get(10)?,
+                    calendar_call_net_debit: row.get(11)?,
+                    pmcc_net_debit: row.get(12)?,
+                })
+            })?;
+            for row in rows {
+                result.push(row?);
+            }
+        }
+        Ok(result)
+    }
+
     pub fn list_market_tone_snapshots(
         &self,
         symbol: Option<&str>,
@@ -337,7 +610,9 @@ impl SignalSnapshotStore {
                 front_atm_iv,
                 term_structure_change_from_front,
                 open_interest_bias_ratio,
-                otm_open_interest_bias_ratio
+                otm_open_interest_bias_ratio,
+                average_iv_bias,
+                otm_average_iv_bias
              FROM market_tone_snapshots
              WHERE symbol = ?1
              ORDER BY captured_at DESC, id DESC
@@ -354,6 +629,8 @@ impl SignalSnapshotStore {
                 term_structure_change_from_front: row.get(5)?,
                 open_interest_bias_ratio: row.get(6)?,
                 otm_open_interest_bias_ratio: row.get(7)?,
+                average_iv_bias: row.get(8)?,
+                otm_average_iv_bias: row.get(9)?,
             })
         })?;
 
@@ -429,7 +706,60 @@ impl SignalSnapshotStore {
             );
 
             CREATE INDEX IF NOT EXISTS idx_front_anchors_symbol_time
-                ON front_structure_anchors(symbol, captured_at);",
+                ON front_structure_anchors(symbol, captured_at);
+
+            CREATE TABLE IF NOT EXISTS strategy_monitor_snapshots (
+                id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at                     TEXT NOT NULL,
+                symbol                          TEXT NOT NULL,
+                near_expiry                     TEXT NOT NULL,
+                near_days_to_expiry             INTEGER NOT NULL,
+                far_expiry                      TEXT NOT NULL,
+                far_days_to_expiry              INTEGER NOT NULL,
+                bull_put_short_strike           REAL,
+                bull_put_long_strike            REAL,
+                bull_put_net_credit             REAL,
+                bull_put_max_loss               REAL,
+                bull_put_breakeven              REAL,
+                bull_put_annualized_return      REAL,
+                bear_call_short_strike          REAL,
+                bear_call_long_strike           REAL,
+                bear_call_net_credit            REAL,
+                bear_call_max_loss              REAL,
+                bear_call_breakeven             REAL,
+                bear_call_annualized_return     REAL,
+                iron_condor_short_put_strike    REAL,
+                iron_condor_long_put_strike     REAL,
+                iron_condor_short_call_strike   REAL,
+                iron_condor_long_call_strike    REAL,
+                iron_condor_net_credit          REAL,
+                iron_condor_max_loss            REAL,
+                iron_condor_breakeven_low       REAL,
+                iron_condor_breakeven_high      REAL,
+                iron_condor_annualized_return   REAL,
+                bull_call_long_strike           REAL,
+                bull_call_short_strike          REAL,
+                bull_call_net_debit             REAL,
+                bull_call_max_profit            REAL,
+                bull_call_max_loss              REAL,
+                bull_call_breakeven             REAL,
+                bull_call_annualized_return     REAL,
+                calendar_call_strike            REAL,
+                calendar_call_net_debit         REAL,
+                calendar_call_theta_carry_per_day REAL,
+                calendar_call_annualized_carry  REAL,
+                calendar_call_max_loss          REAL,
+                pmcc_near_strike                REAL,
+                pmcc_far_strike                 REAL,
+                pmcc_net_debit                  REAL,
+                pmcc_theta_carry_per_day        REAL,
+                pmcc_annualized_carry           REAL,
+                pmcc_max_loss                   REAL,
+                report_json                     TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_strategy_monitor_symbol_time
+                ON strategy_monitor_snapshots(symbol, captured_at);",
         )?;
         Ok(())
     }
@@ -445,6 +775,8 @@ struct MarketExtremeSample {
     term_structure_change_from_front: Option<f64>,
     open_interest_bias_ratio: Option<f64>,
     otm_open_interest_bias_ratio: Option<f64>,
+    average_iv_bias: Option<f64>,
+    otm_average_iv_bias: Option<f64>,
 }
 
 fn compute_front_atm_iv_rank_from_samples(
@@ -518,6 +850,16 @@ fn compute_market_extreme_from_samples(
             samples
                 .iter()
                 .filter_map(|sample| sample.otm_open_interest_bias_ratio),
+        ),
+        average_iv_bias: compute_metric_stat(
+            current.average_iv_bias,
+            samples.iter().filter_map(|sample| sample.average_iv_bias),
+        ),
+        otm_average_iv_bias: compute_metric_stat(
+            current.otm_average_iv_bias,
+            samples
+                .iter()
+                .filter_map(|sample| sample.otm_average_iv_bias),
         ),
     })
 }
@@ -627,6 +969,8 @@ mod tests {
                     term_structure_change_from_front: Some(-0.04),
                     open_interest_bias_ratio: Some(1.8),
                     otm_open_interest_bias_ratio: Some(2.2),
+                    average_iv_bias: Some(0.08),
+                    otm_average_iv_bias: Some(0.12),
                 },
                 MarketExtremeSample {
                     captured_at: "2026-03-02T09:55:00Z".to_string(),
@@ -637,6 +981,8 @@ mod tests {
                     term_structure_change_from_front: Some(-0.01),
                     open_interest_bias_ratio: Some(1.4),
                     otm_open_interest_bias_ratio: Some(1.7),
+                    average_iv_bias: Some(0.03),
+                    otm_average_iv_bias: Some(0.05),
                 },
                 MarketExtremeSample {
                     captured_at: "2026-03-02T09:50:00Z".to_string(),
@@ -647,6 +993,8 @@ mod tests {
                     term_structure_change_from_front: Some(0.00),
                     open_interest_bias_ratio: Some(1.6),
                     otm_open_interest_bias_ratio: Some(1.9),
+                    average_iv_bias: Some(0.05),
+                    otm_average_iv_bias: Some(0.07),
                 },
             ],
         )
@@ -661,6 +1009,13 @@ mod tests {
         assert!(
             row.delta_skew
                 .expect("delta skew stats should exist")
+                .z_score
+                .expect("z-score should exist")
+                > 0.0
+        );
+        assert!(
+            row.otm_average_iv_bias
+                .expect("otm iv bias stats should exist")
                 .z_score
                 .expect("z-score should exist")
                 > 0.0

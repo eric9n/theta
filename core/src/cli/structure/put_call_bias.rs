@@ -7,7 +7,11 @@ use clap::Args;
 #[command(name = "put-call-bias")]
 #[command(about = "CLI for put/call directional demand and positioning bias")]
 pub struct Cli {
-    #[arg(long, help = "Underlying symbol, e.g. TSLA.US")]
+    #[arg(
+        long,
+        default_value = "TSLA.US",
+        help = "Underlying symbol. Default: TSLA.US"
+    )]
     symbol: String,
     #[arg(long, help = "Expiry date in YYYY-MM-DD")]
     expiry: String,

@@ -12,6 +12,13 @@ use crate::market_data::parse_expiry_date;
 use crate::screening_service::ChainScreeningRequest;
 use anyhow::{Context, Result, bail};
 
+#[derive(Debug, Clone, Copy)]
+pub struct ExpirySelection {
+    pub min_days_to_expiry: i64,
+    pub max_days_to_expiry: i64,
+    pub target_days_to_expiry: i64,
+}
+
 pub struct SkewSignalRequest {
     pub symbol: String,
     pub expiry: time::Date,
@@ -91,6 +98,21 @@ impl ThetaSignalService {
         let expiries = self.analysis.market().fetch_option_expiries(symbol).await?;
         select_front_expiry(expiries, time::OffsetDateTime::now_utc().date())
             .with_context(|| format!("no usable option expiries returned for {}", symbol))
+    }
+
+    pub async fn target_expiry_for_symbol(
+        &self,
+        symbol: &str,
+        selection: ExpirySelection,
+    ) -> Result<time::Date> {
+        let expiries = self.analysis.market().fetch_option_expiries(symbol).await?;
+        select_expiry_by_dte(expiries, time::OffsetDateTime::now_utc().date(), selection)
+            .with_context(|| {
+                format!(
+                    "no usable option expiries returned for {} in {}-{} DTE range",
+                    symbol, selection.min_days_to_expiry, selection.max_days_to_expiry
+                )
+            })
     }
 
     pub async fn skew(&self, req: SkewSignalRequest) -> Result<SkewSignalView> {
@@ -850,6 +872,60 @@ fn select_front_expiry(expiries: Vec<String>, today: time::Date) -> Result<time:
         .ok_or_else(|| anyhow::anyhow!("no option expiries available"))
 }
 
+fn select_expiry_by_dte(
+    expiries: Vec<String>,
+    today: time::Date,
+    selection: ExpirySelection,
+) -> Result<time::Date> {
+    if selection.min_days_to_expiry > selection.max_days_to_expiry {
+        bail!(
+            "invalid DTE range: min {} exceeds max {}",
+            selection.min_days_to_expiry,
+            selection.max_days_to_expiry
+        );
+    }
+
+    let mut candidates = Vec::new();
+    for expiry in expiries {
+        let expiry = parse_expiry_date(&expiry)?;
+        let days_to_expiry = (expiry - today).whole_days();
+        if days_to_expiry < 0 {
+            continue;
+        }
+
+        candidates.push((
+            expiry,
+            if days_to_expiry == 0 {
+                1
+            } else {
+                days_to_expiry
+            },
+        ));
+    }
+
+    let Some((expiry, _)) = candidates
+        .into_iter()
+        .filter(|(_, dte)| {
+            *dte >= selection.min_days_to_expiry && *dte <= selection.max_days_to_expiry
+        })
+        .min_by(|(left_expiry, left_dte), (right_expiry, right_dte)| {
+            (left_dte - selection.target_days_to_expiry)
+                .abs()
+                .cmp(&(right_dte - selection.target_days_to_expiry).abs())
+                .then_with(|| left_dte.cmp(right_dte))
+                .then_with(|| left_expiry.cmp(right_expiry))
+        })
+    else {
+        bail!(
+            "no option expiries available in {}-{} DTE range",
+            selection.min_days_to_expiry,
+            selection.max_days_to_expiry
+        );
+    };
+
+    Ok(expiry)
+}
+
 fn select_by_delta(
     rows: &[ChainAnalysisRow],
     side: ContractSide,
@@ -1426,6 +1502,48 @@ mod tests {
             .expect("same-day expiry should resolve");
 
         assert_eq!(expiry, today);
+    }
+
+    #[test]
+    fn select_expiry_by_dte_prefers_nearest_target_within_range() {
+        let today = time::macros::date!(2026 - 03 - 06);
+        let expiry = super::select_expiry_by_dte(
+            vec![
+                "2026-03-09".to_string(),
+                "2026-03-20".to_string(),
+                "2026-04-03".to_string(),
+                "2026-04-17".to_string(),
+            ],
+            today,
+            super::ExpirySelection {
+                min_days_to_expiry: 14,
+                max_days_to_expiry: 45,
+                target_days_to_expiry: 30,
+            },
+        )
+        .expect("target expiry should resolve");
+
+        assert_eq!(expiry, time::macros::date!(2026 - 04 - 03));
+    }
+
+    #[test]
+    fn select_expiry_by_dte_errors_when_no_expiry_fits_range() {
+        let today = time::macros::date!(2026 - 03 - 06);
+        let err = super::select_expiry_by_dte(
+            vec!["2026-03-09".to_string(), "2026-03-13".to_string()],
+            today,
+            super::ExpirySelection {
+                min_days_to_expiry: 14,
+                max_days_to_expiry: 45,
+                target_days_to_expiry: 30,
+            },
+        )
+        .expect_err("selection should fail");
+
+        assert!(
+            err.to_string()
+                .contains("no option expiries available in 14-45 DTE range")
+        );
     }
 
     #[test]

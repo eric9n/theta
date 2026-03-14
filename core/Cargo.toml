@@ -11,7 +11,6 @@ path = "src/bin/theta.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5.60", features = ["derive"] }
-clap_complete = "4.5.52"
 dotenvy = "0.15"
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

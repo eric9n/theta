@@ -7,7 +7,11 @@ use clap::Args;
 #[command(name = "skew")]
 #[command(about = "CLI for option skew and market structure signals")]
 pub struct Cli {
-    #[arg(long, help = "Underlying symbol, e.g. TSLA.US")]
+    #[arg(
+        long,
+        default_value = "TSLA.US",
+        help = "Underlying symbol. Default: TSLA.US"
+    )]
     symbol: String,
     #[arg(long, help = "Expiry date in YYYY-MM-DD")]
     expiry: String,

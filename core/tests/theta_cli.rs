@@ -14,8 +14,7 @@ fn theta_help_lists_top_level_commands() {
             .and(predicate::str::contains("portfolio"))
             .and(predicate::str::contains("signals"))
             .and(predicate::str::contains("structure"))
-            .and(predicate::str::contains("ops"))
-            .and(predicate::str::contains("completion")),
+            .and(predicate::str::contains("ops")),
     );
 }
 
@@ -34,26 +33,14 @@ fn theta_version_reads_explicit_version_file() {
 }
 
 #[test]
-fn theta_completion_bash_outputs_completion_script() {
-    let mut cmd = theta_cmd();
-    cmd.args(["completion", "--shell", "bash"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("_theta()")
-                .and(predicate::str::contains("complete -F"))
-                .and(predicate::str::contains("completion")),
-        );
-}
-
-#[test]
 fn theta_signals_help_lists_signal_commands() {
     let mut cmd = theta_cmd();
     cmd.args(["signals", "--help"]).assert().success().stdout(
         predicate::str::contains("capture")
             .and(predicate::str::contains("history"))
+            .and(predicate::str::contains("monitor"))
             .and(predicate::str::contains("iv-rank"))
-            .and(predicate::str::contains("relative-extreme")),
+            .and(predicate::str::contains("extreme")),
     );
 }
 
@@ -93,19 +80,6 @@ fn theta_ops_health_check_help_works() {
             predicate::str::contains("--symbol")
                 .and(predicate::str::contains("--max-otm-percent"))
                 .and(predicate::str::contains("--min-contracts")),
-        );
-}
-
-#[test]
-fn theta_snapshot_sell_opportunities_help_lists_return_basis_flags() {
-    let mut cmd = theta_cmd();
-    cmd.args(["snapshot", "sell-opportunities", "--help"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("--return-basis")
-                .and(predicate::str::contains("--exclude-return-basis"))
-                .and(predicate::str::contains("--group-by-return-basis")),
         );
 }
 

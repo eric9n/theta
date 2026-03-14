@@ -1,22 +1,39 @@
 # theta
 
-Personal CLI toolkit for option market snapshots, structure signals, and portfolio tracking.
+Personal CLI toolkit for TSLA option monitoring, chain analysis, and portfolio risk.
 
-## Commands
+## Command Map
 
-- `theta snapshot`: market data, analytics, screening, and strategy workflows
-- `theta signals capture`: persist scheduled market tone snapshots to SQLite
-- `theta signals history`: inspect recent stored market tone snapshots
-- `theta signals iv-rank`: compute front ATM IV rank from stored signal snapshots
-- `theta structure skew`: single-expiry skew and market structure signal
-- `theta structure smile`: single-expiry smile / wing shape signal
-- `theta structure put-call-bias`: single-expiry put/call demand and positioning bias
-- `theta structure market-tone`: aggregated front-expiry market structure overview
-- `theta signals extreme`: compare current market-tone metrics against stored history
-- `theta signals relative-extreme`: compare one symbol's current extremes against a benchmark
-- `theta structure term-structure`: multi-expiry ATM IV term structure signal
-- `theta portfolio`: trade journal and position view
-- `theta ops health-check`: lightweight live self-check for daemon and option data
+- `theta signals`
+  TSLA skew / IV history and extreme monitoring.
+- `theta snapshot`
+  Live chain inspection, single-leg analysis, and the four retained strategy screeners.
+- `theta portfolio`
+  Trade journal, positions, strategies, and portfolio Greeks.
+- `theta structure`
+  Single-expiry and term-structure diagnostics when you want raw structure views.
+- `theta ops`
+  Health checks and recurring operational tasks.
+
+## Minimal Workflow
+
+All market-analysis commands default to `TSLA.US`, so the common workflow is:
+
+```bash
+theta signals capture
+theta signals monitor
+theta signals iv-rank
+theta signals extreme
+theta snapshot option-expiries
+theta snapshot analyze-chain --expiry 2026-04-10
+```
+
+Use the strategy screeners only after you already know which structure you want:
+
+- `theta snapshot bull-put-spread --expiry ...`
+- `theta snapshot bull-call-spread --expiry ...`
+- `theta snapshot calendar-call-spread --near-expiry ... --far-expiry ...`
+- `theta snapshot diagonal-call-spread --near-expiry ... --far-expiry ...`
 
 ## Local Setup
 
@@ -61,7 +78,6 @@ This installs:
 - `/usr/local/share/theta/taskd`
 - `/usr/local/share/theta/skills`
 - `/etc/systemd/system/theta-daemon@.service`
-- bash/zsh/fish shell completions
 
 Then configure credentials, enable the daemon, and install the recurring taskd jobs:
 
@@ -69,7 +85,6 @@ Then configure credentials, enable the daemon, and install the recurring taskd j
 mkdir -p ~/.config/theta
 sudo systemctl enable --now theta-daemon@$(whoami)
 sudo /usr/local/share/theta/taskd/install-taskd.sh \
-  --user "$(whoami)" \
   --account firstrade
 ```
 
@@ -90,26 +105,30 @@ Agent integrations should use the shared files under `skills/` instead of an MCP
 
 ## Snapshot
 
-Main analysis and strategy entrypoint:
-
 ```bash
 cargo run --bin theta -- snapshot --help
 ```
 
-Examples:
+Retained strategy screeners:
+
+- `bull-put-spread`
+- `bull-call-spread`
+- `calendar-call-spread`
+- `diagonal-call-spread`
+
+Useful examples:
 
 ```bash
-cargo run --bin theta -- snapshot stock-quote --symbol TSLA.US
-cargo run --bin theta -- snapshot analyze-chain --symbol TSLA.US --expiry 2026-03-20
-cargo run --bin theta -- snapshot cash-secured-put --symbol TSLA.US --expiry 2026-03-20
-cargo run --bin theta -- snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20
-cargo run --bin theta -- snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --return-basis premium-yield
-cargo run --bin theta -- snapshot sell-opportunities --symbol TSLA.US --expiry 2026-03-20 --group-by-return-basis
+cargo run --bin theta -- snapshot stock-quote
+cargo run --bin theta -- snapshot option-expiries
+cargo run --bin theta -- snapshot analyze-chain --expiry 2026-03-20
+cargo run --bin theta -- snapshot analyze-option --symbol TSLA260320C00400000.US
+cargo run --bin theta -- snapshot bull-put-spread --expiry 2026-03-20
 ```
 
 ## Capture Signals
 
-Persist the default `TSLA.US` and `QQQ.US` market tone set into SQLite:
+Persist the default `TSLA.US` skew and market-tone snapshot into SQLite:
 
 ```bash
 cargo run --bin theta -- signals capture
@@ -120,7 +139,6 @@ Optional controls:
 ```bash
 cargo run --bin theta -- signals capture \
   --symbol TSLA.US \
-  --symbol QQQ.US \
   --db ~/.theta/signals.db
 ```
 
@@ -139,6 +157,20 @@ cargo run --bin theta -- signals capture \
   --loop \
   --every-seconds 300 \
   --market-hours-only
+```
+
+## Monitor Richness
+
+Check whether puts or calls are rich, with `otm_skew` as the main signal and OI only as confirmation:
+
+```bash
+cargo run --bin theta -- signals monitor
+```
+
+JSON output:
+
+```bash
+cargo run --bin theta -- signals monitor --json
 ```
 
 ## systemd Daemon
@@ -161,13 +193,10 @@ Example migration flow:
 
 ```bash
 sudo /usr/local/share/theta/taskd/install-taskd.sh \
-  --user "$(whoami)" \
   --account firstrade
 ```
 
 If you prefer hand-editing YAML, use `deploy/taskd/tasks.yaml.example` as the starting point and merge the three `theta-*` tasks into the existing `/etc/taskd/tasks.yaml` instead of replacing unrelated tasks.
-
-If you are upgrading from an older theta install that used systemd for recurring jobs, rerun the installer with `--disable-systemd-schedulers` once to stop the legacy `capture-signals`, `account-monitor`, and `theta-healthcheck` units. The source tree also includes a sample config at `deploy/taskd/tasks.yaml.example`.
 
 Set LongPort API credentials for the daemon in:
 
@@ -230,166 +259,71 @@ Install from an unpacked release bundle with the same script:
 sudo bash deploy/install.sh
 ```
 
-## Signal History
+## Signals Reference
 
-Inspect recent stored snapshots:
+Common inspection commands:
 
 ```bash
 cargo run --bin theta -- signals history
+cargo run --bin theta -- signals iv-rank
+cargo run --bin theta -- signals extreme
 ```
 
-Optional controls:
+Useful options:
 
 ```bash
-cargo run --bin theta -- signals history \
-  --symbol TSLA.US \
-  --limit 20 \
-  --json
+cargo run --bin theta -- signals history --limit 20 --json
+cargo run --bin theta -- signals iv-rank --limit 252 --json
+cargo run --bin theta -- signals extreme --limit 252 --json
 ```
 
-## IV Rank
+## Structure Reference
 
-Compute front ATM IV rank from stored snapshots:
+Use `structure` only when you want raw diagnostics rather than the simplified `signals` workflow.
 
 ```bash
-cargo run --bin theta -- signals iv-rank --symbol TSLA.US
+cargo run --bin theta -- structure skew --expiry 2026-03-20
+cargo run --bin theta -- structure smile --expiry 2026-03-20
+cargo run --bin theta -- structure put-call-bias --expiry 2026-03-20
+cargo run --bin theta -- structure market-tone --expiry 2026-03-20
+cargo run --bin theta -- structure term-structure
 ```
 
-Optional controls:
+JSON examples:
 
 ```bash
-cargo run --bin theta -- signals iv-rank \
-  --symbol TSLA.US \
-  --limit 252 \
-  --json
+cargo run --bin theta -- structure skew --expiry 2026-03-20 --json
+cargo run --bin theta -- structure market-tone --expiry 2026-03-20 --expiries-limit 4 --json
+cargo run --bin theta -- structure term-structure --expiries-limit 6 --json
 ```
 
-## Skew
+## Portfolio Reference
 
-Single-expiry skew signal:
+Use `portfolio` for four things:
+
+- record account state
+- record trades
+- inspect current positions
+- inspect strategy grouping and portfolio Greeks
 
 ```bash
-cargo run --bin theta -- structure skew --symbol TSLA.US --expiry 2026-03-20
+cargo run --bin theta -- portfolio account --help
+cargo run --bin theta -- portfolio trade --help
 ```
 
-Optional controls:
-
-```bash
-cargo run --bin theta -- structure skew \
-  --symbol TSLA.US \
-  --expiry 2026-03-20 \
-  --target-delta 0.25 \
-  --target-otm-percent 0.05 \
-  --json
-```
-
-## Smile
-
-Single-expiry smile and wing shape:
-
-```bash
-cargo run --bin theta -- structure smile --symbol TSLA.US --expiry 2026-03-20
-```
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- structure smile \
-  --symbol TSLA.US \
-  --expiry 2026-03-20 \
-  --target-otm-percent 0.05 \
-  --target-otm-percent 0.10 \
-  --target-otm-percent 0.15 \
-  --json
-```
-
-## Put/Call Bias
-
-Single-expiry directional demand and positioning bias:
-
-```bash
-cargo run --bin theta -- structure put-call-bias --symbol TSLA.US --expiry 2026-03-20
-```
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- structure put-call-bias \
-  --symbol TSLA.US \
-  --expiry 2026-03-20 \
-  --min-otm-percent 0.05 \
-  --json
-```
-
-## Market Tone
-
-Aggregate skew, smile, term structure, and put/call bias:
-
-```bash
-cargo run --bin theta -- structure market-tone --symbol TSLA.US --expiry 2026-03-20
-```
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- structure market-tone \
-  --symbol TSLA.US \
-  --expiry 2026-03-20 \
-  --expiries-limit 4 \
-  --json
-```
-
-## Market Extreme
-
-Compare current market-tone summary metrics against stored history:
-
-```bash
-cargo run --bin theta -- signals extreme --symbol TSLA.US
-```
-
-## Portfolio
-
-Trade journal, account snapshots, position reconstruction, and risk reporting:
-
-```bash
-cargo run --bin theta -- portfolio --help
-```
-
-Initialize the current account state before using `strategies` or `report`:
+Minimal workflow:
 
 ```bash
 cargo run --bin theta -- portfolio account set \
   --cash-balance 50000 \
   --option-buying-power 100000
-```
-
-For a cash account:
-
-```bash
-cargo run --bin theta -- portfolio account set \
-  --cash-balance 50000 \
-  --cash-account
-```
-
-Inspect account snapshots:
-
-```bash
-cargo run --bin theta -- portfolio account show
-cargo run --bin theta -- portfolio account history
-```
-
-Record basic trades:
-
-```bash
 cargo run --bin theta -- portfolio trade buy \
   --symbol TSLA \
   --underlying TSLA \
   --quantity 100 \
   --price 350 \
   --side stock
-```
 
-```bash
 cargo run --bin theta -- portfolio trade sell \
   --symbol TSLA260320P00350000 \
   --underlying TSLA \
@@ -398,144 +332,29 @@ cargo run --bin theta -- portfolio trade sell \
   --side put \
   --strike 350 \
   --expiry 2026-03-20
-```
-
-Inspect the current state:
-
-```bash
 cargo run --bin theta -- portfolio positions
 cargo run --bin theta -- portfolio strategies
 cargo run --bin theta -- portfolio report --offline
 ```
 
-Use live data when available:
+What the main portfolio commands do:
 
-```bash
-cargo run --bin theta -- portfolio report
-```
+- `portfolio account set|show|history`
+  Maintain buying power / cash snapshots.
+- `portfolio trade buy|sell|list`
+  Maintain the trade ledger.
+- `portfolio positions`
+  Reconstruct current open positions from the ledger.
+- `portfolio strategies`
+  Group positions into recognizable option structures.
+- `portfolio report`
+  Show portfolio-level Greeks and risk summary.
 
-Record lifecycle events explicitly:
+Advanced lifecycle actions still exist:
 
-Exercise a long option:
+- `portfolio trade exercise`
+- `portfolio trade assign`
+- `portfolio trade expire`
+- `portfolio trade settle-expiries`
 
-```bash
-cargo run --bin theta -- portfolio trade exercise \
-  --symbol TSLA260320C00400000 \
-  --underlying TSLA \
-  --quantity 1 \
-  --side call \
-  --strike 400 \
-  --expiry 2026-03-20
-```
-
-Record assignment on a short option:
-
-```bash
-cargo run --bin theta -- portfolio trade assign \
-  --symbol TSLA260320P00350000 \
-  --underlying TSLA \
-  --quantity 1 \
-  --side put \
-  --strike 350 \
-  --expiry 2026-03-20
-```
-
-Record an expired option:
-
-```bash
-cargo run --bin theta -- portfolio trade expire \
-  --symbol TSLA260320C00400000 \
-  --underlying TSLA \
-  --quantity 1 \
-  --side call \
-  --position long \
-  --strike 400 \
-  --expiry 2026-03-20
-```
-
-Batch-handle expired open option positions:
-
-Dry-run first:
-
-```bash
-cargo run --bin theta -- portfolio trade settle-expiries \
-  --date 2026-03-20 \
-  --settlement-price TSLA=412.50 \
-  --settlement-price QQQ=518.20
-```
-
-Apply after review:
-
-```bash
-cargo run --bin theta -- portfolio trade settle-expiries \
-  --date 2026-03-20 \
-  --settlement-price TSLA=412.50 \
-  --settlement-price QQQ=518.20 \
-  --apply
-```
-
-Notes:
-
-- `strategies` and `report` require a stored account snapshot.
-- Lifecycle events validate that matching open option positions exist before writing.
-- `settle-expiries --apply` refuses partial settlement if prices are missing or validation fails.
-- Multi-step ledger updates are wrapped in SQLite transactions.
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- signals extreme \
-  --symbol TSLA.US \
-  --limit 252 \
-  --json
-```
-
-## Relative Extreme
-
-Compare one symbol's current market-tone extremes against a benchmark:
-
-```bash
-cargo run --bin theta -- signals relative-extreme --symbol TSLA.US --benchmark QQQ.US
-```
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- signals relative-extreme \
-  --symbol TSLA.US \
-  --benchmark QQQ.US \
-  --limit 252 \
-  --json
-```
-
-## Term Structure
-
-Upcoming-expiry ATM IV term structure:
-
-```bash
-cargo run --bin theta -- structure term-structure --symbol TSLA.US
-```
-
-Optional controls:
-
-```bash
-cargo run --bin theta -- structure term-structure \
-  --symbol TSLA.US \
-  --expiries-limit 6 \
-  --json
-```
-
-## Portfolio
-
-Trade journal and positions:
-
-```bash
-cargo run --bin theta -- portfolio --help
-```
-
-Examples:
-
-```bash
-cargo run --bin theta -- portfolio positions
-cargo run --bin theta -- portfolio trade list
-```
+Use those only when you need explicit lifecycle bookkeeping.

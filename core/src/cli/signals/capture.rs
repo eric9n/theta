@@ -1,5 +1,5 @@
 use crate::daemon_protocol::is_transient_quote_rate_limit_error as is_transient_quote_limit_error;
-use crate::signal_service::{MarketToneRequest, ThetaSignalService};
+use crate::signal_service::{ExpirySelection, MarketToneRequest, ThetaSignalService};
 use crate::snapshot_store::SignalSnapshotStore;
 use anyhow::{Error, Result};
 use clap::Args;
@@ -12,11 +12,11 @@ use tokio::time::{Duration, sleep};
 
 #[derive(Args, Debug)]
 #[command(name = "capture-signals")]
-#[command(about = "Capture market tone snapshots into local SQLite storage")]
+#[command(about = "Capture skew and market-tone snapshots into local SQLite storage")]
 pub struct Cli {
     #[arg(
         long = "symbol",
-        help = "Underlying symbol(s); repeatable. Defaults to TSLA.US and QQQ.US"
+        help = "Underlying symbol(s); repeatable. Defaults to TSLA.US"
     )]
     symbols: Vec<String>,
     #[arg(
@@ -67,6 +67,24 @@ pub struct Cli {
         help = "Minimum OTM percent for put/call bias OTM buckets"
     )]
     bias_min_otm_percent: f64,
+    #[arg(
+        long,
+        default_value_t = 14,
+        help = "Minimum DTE allowed when selecting the expiry used for monitoring"
+    )]
+    min_dte: i64,
+    #[arg(
+        long,
+        default_value_t = 45,
+        help = "Maximum DTE allowed when selecting the expiry used for monitoring"
+    )]
+    max_dte: i64,
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Target DTE; the nearest expiry within the DTE range is selected"
+    )]
+    target_dte: i64,
     #[arg(long, help = "Keep running and capture repeatedly")]
     r#loop: bool,
     #[arg(
@@ -84,7 +102,7 @@ pub struct Cli {
 
 pub async fn run(cli: Cli) -> Result<()> {
     let symbols = if cli.symbols.is_empty() {
-        vec!["TSLA.US".to_string(), "QQQ.US".to_string()]
+        vec!["TSLA.US".to_string()]
     } else {
         cli.symbols
     };
@@ -119,7 +137,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
 
             let capture = async {
-                let front_expiry = service.front_expiry_for_symbol(symbol).await?;
+                let front_expiry = service
+                    .target_expiry_for_symbol(
+                        symbol,
+                        ExpirySelection {
+                            min_days_to_expiry: cli.min_dte,
+                            max_days_to_expiry: cli.max_dte,
+                            target_days_to_expiry: cli.target_dte,
+                        },
+                    )
+                    .await?;
                 let view = service
                     .market_tone(MarketToneRequest {
                         symbol: symbol.clone(),

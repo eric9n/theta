@@ -7,8 +7,6 @@ CONFIG_PATH="${CONFIG_PATH:-/etc/taskd/tasks.yaml}"
 THETA_BIN="${THETA_BIN:-/usr/local/bin/theta}"
 TIMEZONE="${TIMEZONE:-America/New_York}"
 ACCOUNT="${ACCOUNT:-firstrade}"
-USER_NAME="${THETA_USER:-$(id -un)}"
-DISABLE_SYSTEMD_SCHEDULERS=0
 
 usage() {
   cat <<'EOF'
@@ -16,28 +14,20 @@ Usage:
   install-taskd.sh [options]
 
 Options:
-  --user USER                    User name used only for legacy systemd cleanup
   --account ACCOUNT              Account monitor account id. Default: firstrade
   --config PATH                  taskd config path. Default: /etc/taskd/tasks.yaml
   --taskctl PATH                 taskctl binary path
   --theta-bin PATH               theta binary path. Default: /usr/local/bin/theta
   --timezone TZ                  Cron timezone. Default: America/New_York
-  --disable-systemd-schedulers   Disable legacy scheduler units from older theta installs
   --help                         Show this help
 
 This script merges or updates theta taskd jobs in the target tasks.yaml.
 It does not manage theta-daemon; keep theta-daemon under systemd.
-Use --disable-systemd-schedulers only when cleaning up older installs that
-previously scheduled recurring jobs through systemd.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --user)
-      USER_NAME="${2:?missing user value}"
-      shift 2
-      ;;
     --account)
       ACCOUNT="${2:?missing account value}"
       shift 2
@@ -57,10 +47,6 @@ while [[ $# -gt 0 ]]; do
     --timezone)
       TIMEZONE="${2:?missing timezone}"
       shift 2
-      ;;
-    --disable-systemd-schedulers)
-      DISABLE_SYSTEMD_SCHEDULERS=1
-      shift
       ;;
     --help|-h)
       usage
@@ -126,7 +112,7 @@ add_cron_task \
   "0 */5 9-15 ? * Mon-Fri" \
   "${THETA_BIN}" \
   -- \
-  signals capture --market-hours-only
+  signals capture --symbol TSLA.US --market-hours-only
 
 add_cron_task \
   --enabled \
@@ -160,12 +146,6 @@ add_cron_task \
 
 "${TASKCTL_BIN}" --config "${CONFIG_PATH}" validate
 "${TASKCTL_BIN}" --config "${CONFIG_PATH}" list
-
-if [[ "${DISABLE_SYSTEMD_SCHEDULERS}" == "1" ]] && command -v systemctl >/dev/null 2>&1; then
-  systemctl disable --now "capture-signals@${USER_NAME}" >/dev/null 2>&1 || true
-  systemctl disable --now "account-monitor@${USER_NAME}" >/dev/null 2>&1 || true
-  systemctl disable --now "theta-healthcheck@${USER_NAME}.timer" >/dev/null 2>&1 || true
-fi
 
 cat <<EOF
 theta taskd tasks are configured in ${CONFIG_PATH}

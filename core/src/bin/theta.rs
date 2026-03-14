@@ -1,16 +1,11 @@
 use anyhow::Result;
-use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::{
-    generate,
-    shells::{Bash, Elvish, Fish, PowerShell, Zsh},
-};
-use std::io;
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use theta::cli::{ops, portfolio, signals, snapshot, structure};
 
 #[derive(Parser, Debug)]
 #[command(name = "theta")]
-#[command(about = "Unified CLI for market snapshots, structure signals, and portfolio tracking")]
+#[command(about = "Unified CLI for option snapshots and skew-extreme monitoring")]
 #[command(disable_version_flag = true)]
 struct ThetaCli {
     #[arg(short = 'V', long = "version", action = ArgAction::SetTrue, global = true)]
@@ -27,34 +22,6 @@ enum Command {
     Signals(SignalsCommand),
     Structure(StructureCommand),
     Ops(OpsCommand),
-    Completion(CompletionCommand),
-}
-
-#[derive(clap::Args, Debug)]
-#[command(about = "Generate shell completion scripts")]
-struct CompletionCommand {
-    #[arg(long, value_enum)]
-    shell: CompletionShell,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum CompletionShell {
-    Bash,
-    Elvish,
-    Fish,
-    Powershell,
-    Zsh,
-}
-
-fn emit_completion(shell: CompletionShell) {
-    let mut cmd = ThetaCli::command();
-    match shell {
-        CompletionShell::Bash => generate(Bash, &mut cmd, "theta", &mut io::stdout()),
-        CompletionShell::Elvish => generate(Elvish, &mut cmd, "theta", &mut io::stdout()),
-        CompletionShell::Fish => generate(Fish, &mut cmd, "theta", &mut io::stdout()),
-        CompletionShell::Powershell => generate(PowerShell, &mut cmd, "theta", &mut io::stdout()),
-        CompletionShell::Zsh => generate(Zsh, &mut cmd, "theta", &mut io::stdout()),
-    }
 }
 
 fn resolved_version() -> String {
@@ -88,7 +55,7 @@ fn candidate_version_files() -> Vec<PathBuf> {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(about = "Snapshot capture, history, and relative/extreme signal analysis")]
+#[command(about = "Capture skew snapshots and monitor whether puts or calls are historically rich")]
 struct SignalsCommand {
     #[command(subcommand)]
     command: SignalsSubcommand,
@@ -98,9 +65,9 @@ struct SignalsCommand {
 enum SignalsSubcommand {
     Capture(signals::capture::Cli),
     History(signals::history::Cli),
+    Monitor(signals::put_call_monitor::Cli),
     IvRank(signals::iv_rank::Cli),
     Extreme(signals::extreme::Cli),
-    RelativeExtreme(signals::relative_extreme::Cli),
 }
 
 #[derive(clap::Args, Debug)]
@@ -120,7 +87,7 @@ enum StructureSubcommand {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(about = "Operational commands for recurring account monitoring workflows")]
+#[command(about = "Operational commands for daemon health and account checks")]
 struct OpsCommand {
     #[command(subcommand)]
     command: OpsSubcommand,
@@ -130,6 +97,12 @@ struct OpsCommand {
 enum OpsSubcommand {
     AccountMonitor(ops::account_monitor::Cli),
     HealthCheck(ops::health_check::Cli),
+    #[command(hide = true)]
+    StrategyCapture(ops::strategy_capture::Cli),
+    #[command(hide = true)]
+    StrategyHistory(ops::strategy_history::Cli),
+    #[command(hide = true)]
+    StrategyMonitor(ops::strategy_monitor::Cli),
 }
 
 #[tokio::main]
@@ -155,9 +128,9 @@ async fn main() -> Result<()> {
         Command::Signals(signals) => match signals.command {
             SignalsSubcommand::Capture(cli) => signals::capture::run(cli).await,
             SignalsSubcommand::History(cli) => signals::history::run(cli),
+            SignalsSubcommand::Monitor(cli) => signals::put_call_monitor::run(cli),
             SignalsSubcommand::IvRank(cli) => signals::iv_rank::run(cli),
             SignalsSubcommand::Extreme(cli) => signals::extreme::run(cli),
-            SignalsSubcommand::RelativeExtreme(cli) => signals::relative_extreme::run(cli),
         },
         Command::Structure(structure) => match structure.command {
             StructureSubcommand::Skew(cli) => structure::skew::run(cli).await,
@@ -169,10 +142,9 @@ async fn main() -> Result<()> {
         Command::Ops(ops) => match ops.command {
             OpsSubcommand::AccountMonitor(cli) => ops::account_monitor::run(cli).await,
             OpsSubcommand::HealthCheck(cli) => ops::health_check::run(cli).await,
+            OpsSubcommand::StrategyCapture(cli) => ops::strategy_capture::run(cli).await,
+            OpsSubcommand::StrategyHistory(cli) => ops::strategy_history::run(cli),
+            OpsSubcommand::StrategyMonitor(cli) => ops::strategy_monitor::run(cli).await,
         },
-        Command::Completion(completion) => {
-            emit_completion(completion.shell);
-            Ok(())
-        }
     }
 }

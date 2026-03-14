@@ -6,7 +6,11 @@ use clap::Args;
 #[command(name = "term-structure")]
 #[command(about = "CLI for option term structure signals")]
 pub struct Cli {
-    #[arg(long, help = "Underlying symbol, e.g. TSLA.US")]
+    #[arg(
+        long,
+        default_value = "TSLA.US",
+        help = "Underlying symbol. Default: TSLA.US"
+    )]
     symbol: String,
     #[arg(
         long,

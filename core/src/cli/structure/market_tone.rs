@@ -7,7 +7,11 @@ use clap::Args;
 #[command(name = "market-tone")]
 #[command(about = "CLI for aggregated market structure and sentiment tone")]
 pub struct Cli {
-    #[arg(long, help = "Underlying symbol, e.g. TSLA.US")]
+    #[arg(
+        long,
+        default_value = "TSLA.US",
+        help = "Underlying symbol. Default: TSLA.US"
+    )]
     symbol: String,
     #[arg(long, help = "Front expiry date in YYYY-MM-DD")]
     expiry: String,

@@ -12,6 +12,7 @@ use crate::domain::{
 use crate::market_data::decimal_to_f64;
 use crate::screening_service::ChainScreeningRequest;
 use anyhow::{Result, bail};
+use serde::Serialize;
 use std::collections::HashMap;
 use time::Date;
 
@@ -278,6 +279,52 @@ pub struct SellOpportunitiesRequest {
     pub limit: Option<usize>,
 }
 
+pub struct StrategyMonitorRequest {
+    pub symbol: String,
+    pub near_expiry: Date,
+    pub far_expiry: Date,
+    pub rate: Option<f64>,
+    pub dividend: f64,
+    pub iv: Option<f64>,
+    pub iv_from_market_price: bool,
+    pub min_open_interest: Option<i64>,
+    pub min_volume: Option<i64>,
+    pub limit_per_strategy: Option<usize>,
+    pub bull_put_min_short_delta: Option<f64>,
+    pub bull_put_max_short_delta: Option<f64>,
+    pub bull_put_min_short_otm_percent: Option<f64>,
+    pub bull_put_max_short_otm_percent: Option<f64>,
+    pub bear_call_min_short_delta: Option<f64>,
+    pub bear_call_max_short_delta: Option<f64>,
+    pub bear_call_min_short_otm_percent: Option<f64>,
+    pub bear_call_max_short_otm_percent: Option<f64>,
+    pub min_width_per_spread: Option<f64>,
+    pub max_width_per_spread: Option<f64>,
+    pub max_bull_call_net_debit_per_spread: Option<f64>,
+    pub max_calendar_net_debit_per_spread: Option<f64>,
+    pub max_diagonal_net_debit_per_spread: Option<f64>,
+    pub min_calendar_theta_carry_per_day: Option<f64>,
+    pub min_diagonal_theta_carry_per_day: Option<f64>,
+    pub min_days_gap: Option<i64>,
+    pub max_days_gap: Option<i64>,
+    pub min_strike_gap: Option<f64>,
+    pub max_strike_gap: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StrategyMonitorView {
+    pub symbol: String,
+    pub near_expiry: String,
+    pub near_days_to_expiry: i64,
+    pub far_expiry: String,
+    pub far_days_to_expiry: i64,
+    pub bull_put_spread: BullPutSpreadView,
+    pub bear_call_spread: BearCallSpreadView,
+    pub bull_call_spread: BullCallSpreadView,
+    pub calendar_call_spread: CalendarCallSpreadView,
+    pub diagonal_call_spread: DiagonalCallSpreadView,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub enum MispricingDirection {
     Overpriced,
@@ -394,6 +441,212 @@ impl ThetaStrategyService {
             req.min_abs_iv_diff_percent,
             req.limit,
         )
+    }
+
+    pub async fn screen_strategy_monitor(
+        &self,
+        req: StrategyMonitorRequest,
+    ) -> Result<StrategyMonitorView> {
+        let near_put_analysis = self
+            .analysis
+            .analyze_chain(
+                req.near_expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        side: Some(ContractSide::Put),
+                        min_delta: req.bull_put_min_short_delta,
+                        max_delta: req.bull_put_max_short_delta,
+                        min_otm_percent: req.bull_put_min_short_otm_percent,
+                        max_otm_percent: req.bull_put_max_short_otm_percent,
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+
+        let near_bear_call_analysis = self
+            .analysis
+            .analyze_chain(
+                req.near_expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        side: Some(ContractSide::Call),
+                        min_delta: req.bear_call_min_short_delta,
+                        max_delta: req.bear_call_max_short_delta,
+                        min_otm_percent: req.bear_call_min_short_otm_percent,
+                        max_otm_percent: req.bear_call_max_short_otm_percent,
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+
+        let near_call_analysis = self
+            .analysis
+            .analyze_chain(
+                req.near_expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        side: Some(ContractSide::Call),
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+
+        let near_bull_call_analysis = self
+            .analysis
+            .analyze_chain(
+                req.near_expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        side: Some(ContractSide::Call),
+                        min_option_price: Some(0.50),
+                        min_otm_percent: Some(-0.10),
+                        max_otm_percent: Some(0.15),
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+
+        let far_call_analysis = self
+            .analysis
+            .analyze_chain(
+                req.far_expiry,
+                AnalyzeChainRequest {
+                    symbol: req.symbol.clone(),
+                    rate: req.rate,
+                    dividend: req.dividend,
+                    iv: req.iv,
+                    iv_from_market_price: req.iv_from_market_price,
+                    screening: ChainScreeningRequest {
+                        side: Some(ContractSide::Call),
+                        only_liquid: true,
+                        exclude_abnormal: true,
+                        exclude_near_expiry: true,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await?;
+        let far_days_to_expiry = far_call_analysis.days_to_expiry;
+
+        let limit = req.limit_per_strategy;
+        let bull_put_spread = build_bull_put_spread_view(
+            near_put_analysis,
+            req.dividend,
+            None,
+            None,
+            req.min_open_interest,
+            req.min_volume,
+            None,
+            req.min_width_per_spread,
+            req.max_width_per_spread,
+            None,
+            None,
+            None,
+            None,
+            limit,
+        )?;
+        let bear_call_spread = build_bear_call_spread_view(
+            near_bear_call_analysis,
+            req.dividend,
+            None,
+            None,
+            req.min_open_interest,
+            req.min_volume,
+            None,
+            req.min_width_per_spread,
+            req.max_width_per_spread,
+            None,
+            None,
+            None,
+            None,
+            limit,
+        )?;
+        let bull_call_spread = build_bull_call_spread_view(
+            near_bull_call_analysis,
+            req.min_open_interest,
+            req.min_volume,
+            req.max_bull_call_net_debit_per_spread,
+            req.min_width_per_spread,
+            req.max_width_per_spread,
+            None,
+            None,
+            limit,
+        )?;
+        let calendar_call_spread = build_calendar_call_spread_view(
+            near_call_analysis.clone(),
+            far_call_analysis.clone(),
+            req.min_open_interest,
+            req.min_volume,
+            req.max_calendar_net_debit_per_spread,
+            req.min_calendar_theta_carry_per_day,
+            req.min_days_gap,
+            req.max_days_gap,
+            req.min_strike_gap,
+            req.max_strike_gap,
+            limit,
+        )?;
+        let diagonal_call_spread = build_diagonal_call_spread_view(
+            near_call_analysis,
+            far_call_analysis,
+            req.min_open_interest,
+            req.min_volume,
+            req.max_diagonal_net_debit_per_spread,
+            req.min_diagonal_theta_carry_per_day,
+            req.min_days_gap,
+            req.max_days_gap,
+            req.min_strike_gap,
+            req.max_strike_gap,
+            limit,
+        )?;
+
+        Ok(StrategyMonitorView {
+            symbol: bull_put_spread.underlying_symbol.clone(),
+            near_expiry: bull_put_spread.expiry.clone(),
+            near_days_to_expiry: bull_put_spread.days_to_expiry,
+            far_expiry: calendar_call_spread.far_expiry.clone(),
+            far_days_to_expiry,
+            bull_put_spread,
+            bear_call_spread,
+            bull_call_spread,
+            calendar_call_spread,
+            diagonal_call_spread,
+        })
     }
 
     pub async fn screen_covered_calls(&self, req: CoveredCallRequest) -> Result<CoveredCallView> {

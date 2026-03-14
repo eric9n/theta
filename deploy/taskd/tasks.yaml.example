@@ -20,6 +20,8 @@ tasks:
       args:
         - signals
         - capture
+        - --symbol
+        - TSLA.US
         - --market-hours-only
       timeout_seconds: 300
 
