@@ -68,3 +68,28 @@ tasks:
         - ops
         - health-check
       timeout_seconds: 300
+
+  - id: theta-extreme-alert
+    name: theta extreme alert
+    enabled: false
+    concurrency:
+      policy: forbid
+      max_running: 1
+    retry:
+      max_attempts: 0
+      delay_seconds: 1
+    schedule:
+      kind: cron
+      # Run shortly after signal capture so the alert reads the latest snapshot.
+      expr: 30 */5 9-15 ? * Mon-Fri
+      timezone: America/New_York
+    notify:
+      result_source:
+        kind: stdout
+    command:
+      program: /usr/local/bin/theta
+      args:
+        - signals
+        - alert
+        - --json
+      timeout_seconds: 120

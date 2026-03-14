@@ -7,6 +7,7 @@ CONFIG_PATH="${CONFIG_PATH:-/etc/taskd/tasks.yaml}"
 THETA_BIN="${THETA_BIN:-/usr/local/bin/theta}"
 TIMEZONE="${TIMEZONE:-America/New_York}"
 ACCOUNT="${ACCOUNT:-firstrade}"
+ENABLE_ALERT_TASK="${ENABLE_ALERT_TASK:-0}"
 
 usage() {
   cat <<'EOF'
@@ -16,6 +17,7 @@ Usage:
 Options:
   --account ACCOUNT              Account monitor account id. Default: firstrade
   --config PATH                  taskd config path. Default: /etc/taskd/tasks.yaml
+  --enable-alert                 Enable theta extreme alert notifications after install
   --taskctl PATH                 taskctl binary path
   --theta-bin PATH               theta binary path. Default: /usr/local/bin/theta
   --timezone TZ                  Cron timezone. Default: America/New_York
@@ -35,6 +37,10 @@ while [[ $# -gt 0 ]]; do
     --config)
       CONFIG_PATH="${2:?missing config path}"
       shift 2
+      ;;
+    --enable-alert)
+      ENABLE_ALERT_TASK=1
+      shift 1
       ;;
     --taskctl)
       TASKCTL_BIN="${2:?missing taskctl path}"
@@ -98,6 +104,7 @@ add_cron_task() {
 remove_if_present "theta-capture-signals"
 remove_if_present "theta-account-monitor"
 remove_if_present "theta-healthcheck"
+remove_if_present "theta-extreme-alert"
 
 add_cron_task \
   --enabled \
@@ -144,12 +151,79 @@ add_cron_task \
   -- \
   ops health-check
 
+add_cron_task \
+  --enabled \
+  --timezone "${TIMEZONE}" \
+  --timeout-seconds 120 \
+  --concurrency-policy forbid \
+  --max-running 1 \
+  --retry-max-attempts 0 \
+  theta-extreme-alert \
+  "theta extreme alert" \
+  "30 */5 9-15 ? * Mon-Fri" \
+  "${THETA_BIN}" \
+  -- \
+  signals alert --json
+
+inject_stdout_notify() {
+  local task_id="$1"
+  local tmp_file
+  tmp_file="$(mktemp)"
+  awk -v task_id="${task_id}" '
+    BEGIN {
+      in_target = 0
+      has_notify = 0
+      inserted = 0
+    }
+    function print_notify_block() {
+      if (!inserted && !has_notify) {
+        print "  notify:"
+        print "    result_source:"
+        print "      kind: stdout"
+        inserted = 1
+      }
+    }
+    /^[[:space:]]*-[[:space:]]+id:[[:space:]]*/ {
+      if (in_target) {
+        print_notify_block()
+      }
+      in_target = ($0 ~ "^[[:space:]]*-[[:space:]]+id:[[:space:]]*" task_id "[[:space:]]*$")
+      has_notify = 0
+      inserted = 0
+      print
+      next
+    }
+    {
+      if (in_target && $0 ~ /^[[:space:]]*notify:[[:space:]]*$/) {
+        has_notify = 1
+      }
+      if (in_target && !has_notify && !inserted && $0 ~ /^[[:space:]]*command:[[:space:]]*$/) {
+        print_notify_block()
+      }
+      print
+    }
+    END {
+      if (in_target) {
+        print_notify_block()
+      }
+    }
+  ' "${CONFIG_PATH}" > "${tmp_file}"
+  mv "${tmp_file}" "${CONFIG_PATH}"
+}
+
+inject_stdout_notify "theta-extreme-alert"
+
+if [[ "${ENABLE_ALERT_TASK}" != "1" ]]; then
+  "${TASKCTL_BIN}" --config "${CONFIG_PATH}" disable "theta-extreme-alert" >/dev/null
+fi
+
 "${TASKCTL_BIN}" --config "${CONFIG_PATH}" validate
 "${TASKCTL_BIN}" --config "${CONFIG_PATH}" list
 
 cat <<EOF
 theta taskd tasks are configured in ${CONFIG_PATH}
 - theta-daemon remains under systemd
-- updated tasks: theta-capture-signals, theta-account-monitor, theta-healthcheck
+- updated tasks: theta-capture-signals, theta-account-monitor, theta-healthcheck, theta-extreme-alert
+- theta-extreme-alert is disabled by default; enable it with taskctl once taskd notify gating is ready
 - taskd will reload the watched config automatically
 EOF
