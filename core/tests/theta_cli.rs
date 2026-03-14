@@ -37,6 +37,7 @@ fn theta_signals_help_lists_signal_commands() {
     let mut cmd = theta_cmd();
     cmd.args(["signals", "--help"]).assert().success().stdout(
         predicate::str::contains("capture")
+            .and(predicate::str::contains("alert"))
             .and(predicate::str::contains("history"))
             .and(predicate::str::contains("monitor"))
             .and(predicate::str::contains("iv-rank"))
@@ -146,6 +147,18 @@ fn theta_signals_iv_rank_on_empty_db_succeeds() {
     .stdout(predicate::str::contains(
         "No IV rank samples found for TSLA.US.",
     ));
+}
+
+#[test]
+fn theta_signals_alert_on_empty_db_returns_notify_false() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("signals.db");
+
+    let mut cmd = theta_cmd();
+    cmd.args(["signals", "alert", "--db", db.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"notify\": false"));
 }
 
 #[test]

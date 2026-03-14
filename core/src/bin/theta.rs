@@ -63,6 +63,7 @@ struct SignalsCommand {
 
 #[derive(Subcommand, Debug)]
 enum SignalsSubcommand {
+    Alert(signals::alert::Cli),
     Capture(signals::capture::Cli),
     History(signals::history::Cli),
     Monitor(signals::put_call_monitor::Cli),
@@ -126,6 +127,7 @@ async fn main() -> Result<()> {
         Command::Snapshot(cli) => snapshot::run(cli).await,
         Command::Portfolio(cli) => portfolio::run(cli).await,
         Command::Signals(signals) => match signals.command {
+            SignalsSubcommand::Alert(cli) => signals::alert::run(cli),
             SignalsSubcommand::Capture(cli) => signals::capture::run(cli).await,
             SignalsSubcommand::History(cli) => signals::history::run(cli),
             SignalsSubcommand::Monitor(cli) => signals::put_call_monitor::run(cli),

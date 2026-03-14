@@ -56,39 +56,39 @@ pub struct Cli {
     json: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct MonitorMetricView {
-    source: String,
-    current: f64,
-    mean: f64,
-    std_dev: f64,
-    z_score: Option<f64>,
-    sigma_label: String,
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MonitorMetricView {
+    pub(crate) source: String,
+    pub(crate) current: f64,
+    pub(crate) mean: f64,
+    pub(crate) std_dev: f64,
+    pub(crate) z_score: Option<f64>,
+    pub(crate) sigma_label: String,
 }
 
 #[derive(Debug, Serialize)]
-struct MonitorAssessment {
-    state: String,
-    source: String,
-    current: Option<f64>,
-    z_score: Option<f64>,
-    sigma_triggered: bool,
-    rationale: String,
+pub(crate) struct MonitorAssessment {
+    pub(crate) state: String,
+    pub(crate) source: String,
+    pub(crate) current: Option<f64>,
+    pub(crate) z_score: Option<f64>,
+    pub(crate) sigma_triggered: bool,
+    pub(crate) rationale: String,
 }
 
 #[derive(Debug, Serialize)]
-struct PutCallMonitorView {
-    symbol: String,
-    sample_count: usize,
-    current_captured_at: String,
-    current_front_expiry: String,
-    current_days_to_expiry: Option<i64>,
-    sigma_threshold: f64,
-    richness_metric: Option<MonitorMetricView>,
-    confirmation_metric: Option<MonitorMetricView>,
-    richness: MonitorAssessment,
-    confirmation: MonitorAssessment,
-    composite_signal: String,
+pub(crate) struct PutCallMonitorView {
+    pub(crate) symbol: String,
+    pub(crate) sample_count: usize,
+    pub(crate) current_captured_at: String,
+    pub(crate) current_front_expiry: String,
+    pub(crate) current_days_to_expiry: Option<i64>,
+    pub(crate) sigma_threshold: f64,
+    pub(crate) richness_metric: Option<MonitorMetricView>,
+    pub(crate) confirmation_metric: Option<MonitorMetricView>,
+    pub(crate) richness: MonitorAssessment,
+    pub(crate) confirmation: MonitorAssessment,
+    pub(crate) composite_signal: String,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -147,7 +147,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn build_monitor_view(
+pub(crate) fn build_monitor_view(
     row: &MarketExtremeRow,
     sigma_threshold: f64,
     put_dominance_ratio: f64,

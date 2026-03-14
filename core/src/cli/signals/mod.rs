@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod capture;
 pub mod extreme;
 pub mod history;
