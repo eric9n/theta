@@ -5,7 +5,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 #[command(name = "market-tone")]
-#[command(about = "CLI for aggregated market structure and sentiment tone")]
+#[command(about = "Summarize skew, bias, and term structure")]
 pub struct Cli {
     #[arg(
         long,

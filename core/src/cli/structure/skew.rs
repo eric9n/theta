@@ -5,7 +5,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 #[command(name = "skew")]
-#[command(about = "CLI for option skew and market structure signals")]
+#[command(about = "Compare put-wing vs call-wing IV")]
 pub struct Cli {
     #[arg(
         long,

@@ -5,7 +5,7 @@ use theta::cli::{ops, portfolio, signals, snapshot, structure};
 
 #[derive(Parser, Debug)]
 #[command(name = "theta")]
-#[command(about = "Unified CLI for option snapshots and skew-extreme monitoring")]
+#[command(about = "TSLA option monitoring, chain analysis, and portfolio risk")]
 #[command(disable_version_flag = true)]
 struct ThetaCli {
     #[arg(short = 'V', long = "version", action = ArgAction::SetTrue, global = true)]
@@ -71,7 +71,7 @@ enum SignalsSubcommand {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(about = "Single-expiry and term-structure options structure analysis")]
+#[command(about = "Raw option structure diagnostics")]
 struct StructureCommand {
     #[command(subcommand)]
     command: StructureSubcommand,

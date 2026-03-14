@@ -5,7 +5,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 #[command(name = "put-call-bias")]
-#[command(about = "CLI for put/call directional demand and positioning bias")]
+#[command(about = "Compare put vs call IV, volume, and open interest")]
 pub struct Cli {
     #[arg(
         long,

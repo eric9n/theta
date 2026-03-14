@@ -24,7 +24,7 @@ struct IntentGroupView {
 
 #[derive(Args, Debug)]
 #[command(name = "portfolio")]
-#[command(about = "Options portfolio trade journal & risk analytics")]
+#[command(about = "Trade journal, positions, strategies, and portfolio Greeks")]
 pub struct Cli {
     /// Path to the portfolio database (default: ~/.theta/portfolio.db)
     #[arg(long, global = true)]
@@ -40,7 +40,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Record and inspect account-level buying power snapshots
+    /// Record cash and buying-power snapshots
     Account {
         #[command(subcommand)]
         action: AccountAction,

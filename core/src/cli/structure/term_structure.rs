@@ -4,7 +4,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 #[command(name = "term-structure")]
-#[command(about = "CLI for option term structure signals")]
+#[command(about = "Inspect ATM IV across expiries")]
 pub struct Cli {
     #[arg(
         long,

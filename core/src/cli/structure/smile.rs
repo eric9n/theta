@@ -5,7 +5,7 @@ use clap::Args;
 
 #[derive(Args, Debug)]
 #[command(name = "smile")]
-#[command(about = "CLI for option smile and wing structure signals")]
+#[command(about = "Inspect the IV curve across strikes")]
 pub struct Cli {
     #[arg(
         long,

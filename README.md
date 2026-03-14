@@ -2,28 +2,42 @@
 
 Personal CLI toolkit for TSLA option monitoring, chain analysis, and portfolio risk.
 
-## Command Map
+## Daily Workflow
 
-- `theta signals`
-  TSLA skew / IV history and extreme monitoring.
-- `theta snapshot`
-  Live chain inspection, single-leg analysis, and the four retained strategy screeners.
-- `theta portfolio`
-  Trade journal, positions, strategies, and portfolio Greeks.
-- `theta structure`
-  Single-expiry and term-structure diagnostics when you want raw structure views.
-- `theta ops`
-  Health checks and recurring operational tasks.
+All market-analysis commands default to `TSLA.US`, so the normal flow is:
 
-## Minimal Workflow
+1. Check current positions and portfolio Greeks.
+2. Check whether the current regime is interesting.
+3. If needed, inspect the raw structure behind that signal.
+4. Pick an expiry and inspect the chain.
+5. Screen the strategy you already want to trade.
 
-All market-analysis commands default to `TSLA.US`, so the common workflow is:
+Start by reviewing the risk already on the book:
 
 ```bash
-theta signals capture
+theta portfolio positions
+theta portfolio report --offline
+```
+
+Start with the fast signal view:
+
+```bash
 theta signals monitor
 theta signals iv-rank
 theta signals extreme
+```
+
+If the signal is interesting and you want detail, drill into raw structure:
+
+```bash
+theta structure skew --expiry 2026-04-10
+theta structure term-structure
+theta structure put-call-bias --expiry 2026-04-10
+```
+
+Then inspect the chain you may trade:
+
+```bash
 theta snapshot option-expiries
 theta snapshot analyze-chain --expiry 2026-04-10
 ```
@@ -34,6 +48,25 @@ Use the strategy screeners only after you already know which structure you want:
 - `theta snapshot bull-call-spread --expiry ...`
 - `theta snapshot calendar-call-spread --near-expiry ... --far-expiry ...`
 - `theta snapshot diagonal-call-spread --near-expiry ... --far-expiry ...`
+
+Signal history is usually collected in the background by `taskd`, but you can still run it manually:
+
+```bash
+theta signals capture
+```
+
+## Command Map
+
+- `theta signals`
+  TSLA skew / IV history and extreme monitoring.
+- `theta structure`
+  Raw structure diagnostics when you want more detail than `signals`.
+- `theta snapshot`
+  Live chain inspection, single-leg analysis, and four strategy screeners.
+- `theta portfolio`
+  Trade journal, positions, strategies, and portfolio Greeks.
+- `theta ops`
+  Health checks and recurring operational tasks.
 
 ## Local Setup
 
@@ -94,12 +127,6 @@ Run a manual live self-check any time:
 /usr/local/bin/theta ops health-check
 ```
 
-Update later with the same one-liner:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
-```
-
 The old source checkout at `~/theta` or `/root/theta` is not required.
 Agent integrations should use the shared files under `skills/` instead of an MCP adapter.
 
@@ -124,6 +151,34 @@ cargo run --bin theta -- snapshot option-expiries
 cargo run --bin theta -- snapshot analyze-chain --expiry 2026-03-20
 cargo run --bin theta -- snapshot analyze-option --symbol TSLA260320C00400000.US
 cargo run --bin theta -- snapshot bull-put-spread --expiry 2026-03-20
+```
+
+## Structure
+
+```bash
+cargo run --bin theta -- structure --help
+```
+
+Use `structure` as the detailed view behind `signals`:
+
+- `skew`
+  Inspect whether put wing or call wing is richer for a specific expiry.
+- `term-structure`
+  Inspect ATM IV across expiries.
+- `put-call-bias`
+  Compare put/call IV, volume, and open interest for a specific expiry.
+- `market-tone`
+  Summarize skew, bias, and term structure in one view.
+- `smile`
+  Inspect the IV curve across strikes.
+
+Useful examples:
+
+```bash
+cargo run --bin theta -- structure skew --expiry 2026-03-20
+cargo run --bin theta -- structure term-structure
+cargo run --bin theta -- structure put-call-bias --expiry 2026-03-20
+cargo run --bin theta -- structure market-tone --expiry 2026-03-20
 ```
 
 ## Capture Signals
@@ -187,8 +242,6 @@ For recurring theta jobs, keep `theta-daemon` under systemd and let `taskd` trig
 - Installed taskd assets: `/usr/local/share/theta/taskd/`
 - Keep `theta-daemon@.service` enabled; do not move the daemon itself into `taskd`
 
-The sample uses `America/New_York` cron schedules and keeps `--market-hours-only` on the commands as a guardrail. That means the 09:00-09:25 ET triggers are harmless no-op exits, while still keeping each logical workflow in a single `taskd` task.
-
 Example migration flow:
 
 ```bash
@@ -227,21 +280,6 @@ sudo journalctl -u theta-daemon@$(whoami) -f
 /opt/taskd/taskctl history theta-account-monitor --limit 20
 /opt/taskd/taskctl history theta-healthcheck --limit 20
 ```
-
-Update to the latest release:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eric9n/theta/main/deploy/install.sh | sudo bash
-```
-
-Optional overrides:
-
-- `THETA_REPO`: GitHub repo in `owner/name` form
-- `THETA_VERSION`: release tag or `latest` (default)
-- `PREFIX`: install prefix for binaries (default: `/usr/local/bin`)
-- `SHARE_DIR`: shared data dir for installed skills (default: `/usr/local/share/theta`)
-- `SYSTEMD_DIR`: systemd unit dir (default: `/etc/systemd/system`)
-- `REMOVE_LEGACY_ROOT=1`: remove `/root/theta` after successful install
 
 ## Release Bundle
 
@@ -337,7 +375,7 @@ cargo run --bin theta -- portfolio strategies
 cargo run --bin theta -- portfolio report --offline
 ```
 
-What the main portfolio commands do:
+Main portfolio commands:
 
 - `portfolio account set|show|history`
   Maintain buying power / cash snapshots.
